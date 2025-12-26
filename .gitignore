@@ -205,3 +205,77 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+venv/
+.env/
+.venv/
+ENV/
+env/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ===============================
+# Environment variables / secrets
+# ===============================
+.env
+.env.*
+*.key
+*.pem
+
+# ===============================
+# Logs & runtime files
+# ===============================
+*.log
+logs/
+*.sqlite3
+
+# ===============================
+# Jupyter / experiments
+# ===============================
+.ipynb_checkpoints/
+notebooks/
+experiments/
+
+# ===============================
+# OS / Editor
+# ===============================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ===============================
+# Docker
+# ===============================
+# Docker runtime artifacts
+docker-compose.override.yml
+*.pid
+
+# Ignore local Docker volumes / bind mounts
+docker-data/
+volumes/
+
+# ===============================
+# Project specific
+# ===============================
+# Large intermediate data (CRM pipeline outputs if regenerated)
+data/tmp/
+data/cache/
+
+# Model outputs / generated text logs
+outputs/
+generated/
