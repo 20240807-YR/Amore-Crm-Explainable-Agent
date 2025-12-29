@@ -1,11 +1,20 @@
 import pandas as pd
 from pathlib import Path
 
-DATA_DIR = Path("/Users/mac/Desktop/AMORE/Amore-Crm-Explainable-Agent/data")
+# product_selector.py 위치 기준으로 ../data 를 잡는다
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR.parent / "data"
 
 class ProductSelector:
     def __init__(self):
-        self.df = pd.read_csv(DATA_DIR / "amore_with_category.csv")
+        csv_path = DATA_DIR / "amore_with_category.csv"
+
+        if not csv_path.exists():
+            raise FileNotFoundError(
+                f"[ProductSelector] CSV not found: {csv_path}"
+            )
+
+        self.df = pd.read_csv(csv_path)
         self.cols = list(self.df.columns)
 
         self.name_col = self._pick([

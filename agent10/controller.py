@@ -10,7 +10,7 @@ from verifier import MessageVerifier
 from tone_profiles import ToneProfiles
 from market_context_tool import MarketContextTool
 
-DATA_DIR = Path("/Users/mac/Desktop/AMORE/Amore-Crm-Explainable-Agent/data")
+DATA_DIR = Path("./data")
 
 def main(persona_id, topk=3, use_market_context=False, verbose=True):
     t0 = time.time()
