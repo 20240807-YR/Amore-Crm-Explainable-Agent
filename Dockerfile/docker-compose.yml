@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: agent10-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: agent10
+      POSTGRES_USER: agent10_user
+      POSTGRES_PASSWORD: agent10_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent10_user -d agent10"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  agent10:
+    build:
+      context: .
+      dockerfile: Dockerfile/dockerfile   
+    container_name: agent10-crm
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+
+      OPENAI_OFFLINE: "0"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: agent10
+      DB_USER: agent10_user
+      DB_PASSWORD: agent10_pass
+    volumes:
+      - ./data:/app/data
+    command: python agent10/run_agent10_test.py
+
+volumes:
+  postgres_data:

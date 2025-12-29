@@ -1,0 +1,6 @@
+openai>=1.0.0
+pandas
+numpy
+scikit-learn
+psycopg2-binary
+python-dotenv
