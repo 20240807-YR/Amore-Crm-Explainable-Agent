@@ -3,7 +3,14 @@ from pathlib import Path
 
 START = time.time()
 
-PROJECT_ROOT_ABS = Path("/Users/mac/Desktop/AMORE/Amore-Crm-Explainable-Agent").resolve()
+# [수정된 부분] -------------------------------------------------------
+# 현재 파일(run_agent10_test.py)의 위치를 기준으로 프로젝트 루트를 찾습니다.
+# .resolve() : 절대 경로로 변환
+# .parent    : agent10 폴더
+# .parent.parent : Amore-Crm-Explainable-Agent 폴더 (프로젝트 루트)
+PROJECT_ROOT_ABS = Path(__file__).resolve().parent.parent
+# ---------------------------------------------------------------------
+
 AGENT_DIR_ABS = PROJECT_ROOT_ABS / "agent10"
 DATA_DIR_ABS = PROJECT_ROOT_ABS / "data"
 
@@ -15,7 +22,8 @@ if str(PROJECT_ROOT_ABS) not in sys.path:
 print(f"[{time.time()-START:6.2f}s] BOOT")
 print("PROJECT_ROOT:", PROJECT_ROOT_ABS)
 print("AGENT_DIR    :", AGENT_DIR_ABS)
-print("DATA_DIR     :", DATA_DIR_ABS, "exists=", DATA_DIR_ABS.exists())
+# 아래 exists가 True로 나오는지 확인하세요
+print("DATA_DIR     :", DATA_DIR_ABS, "exists=", DATA_DIR_ABS.exists()) 
 print("OPENAI_OFFLINE:", os.getenv("OPENAI_OFFLINE", "0"))
 
 from controller import main
