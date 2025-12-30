@@ -1,3 +1,4 @@
+# rules 로딩
 def load_brand_rules(csv_path):
     df = pd.read_csv(csv_path)
     rules = {}
@@ -6,12 +7,13 @@ def load_brand_rules(csv_path):
         rules.setdefault(brand, []).append(row)
     return rules
 
+# banned 검증
 def check_banned(message, banned_rule):
     for keyword in banned_rule.split(","):
         if keyword.strip() in message:
             return f"금지 표현 포함: {keyword}"
     return None
-
+# tone_guard 검증
 def check_tone_guard(message, tone_guard):
     # 단순 1차: 핵심 관점 키워드 포함 여부
     key_terms = ["균형", "부담", "리듬", "기본", "지속"]  # 브랜드별로 다르게
@@ -19,7 +21,7 @@ def check_tone_guard(message, tone_guard):
     if hit == 0:
         return "브랜드 톤 관점 이탈"
     return None
-
+# 검증 실패 시 처리
 errors = []
 err = check_banned(body, rule["banned"])
 if err: errors.append(err)
