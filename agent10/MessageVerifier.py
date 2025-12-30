@@ -1,30 +1,44 @@
-# rules 로딩
-def load_brand_rules(csv_path):
-    df = pd.read_csv(csv_path)
-    rules = {}
-    for _, row in df.iterrows():
-        brand = row["brand"]
-        rules.setdefault(brand, []).append(row)
-    return rules
+def _split_keywords(text: str):
+    if not isinstance(text, str):
+        return []
+    return [t.strip() for t in text.split(",") if t.strip()]
 
-# banned 검증
-def check_banned(message, banned_rule):
-    for keyword in banned_rule.split(","):
-        if keyword.strip() in message:
-            return f"금지 표현 포함: {keyword}"
-    return None
-# tone_guard 검증
-def check_tone_guard(message, tone_guard):
-    # 단순 1차: 핵심 관점 키워드 포함 여부
-    key_terms = ["균형", "부담", "리듬", "기본", "지속"]  # 브랜드별로 다르게
-    hit = sum(1 for k in key_terms if k in message)
-    if hit == 0:
-        return "브랜드 톤 관점 이탈"
-    return None
-# 검증 실패 시 처리
-errors = []
-err = check_banned(body, rule["banned"])
-if err: errors.append(err)
 
-err = check_tone_guard(body, rule["tone_guard"])
-if err: errors.append(err)
+def check_banned(message: str, banned: str):
+    hits = [k for k in _split_keywords(banned) if k in message]
+    if hits:
+        return f"banned hit: {hits}"
+    return None
+
+
+def check_must_include(message: str, must_include: str):
+    keywords = _split_keywords(must_include)
+    if not keywords:
+        return None
+    if not any(k in message for k in keywords):
+        return f"must_include miss: {keywords}"
+    return None
+
+
+def check_viewpoint(message: str, viewpoint: str):
+    keywords = _split_keywords(viewpoint)
+    if not keywords:
+        return None
+    if not any(k in message for k in keywords):
+        return f"viewpoint miss: {keywords}"
+    return None
+
+
+def verify_brand_rules(message: str, rule_row: dict):
+    errors = []
+
+    e = check_banned(message, rule_row.get("banned", ""))
+    if e: errors.append(e)
+
+    e = check_must_include(message, rule_row.get("must_include", ""))
+    if e: errors.append(e)
+
+    e = check_viewpoint(message, rule_row.get("viewpoint", ""))
+    if e: errors.append(e)
+
+    return errors
