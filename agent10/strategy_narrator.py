@@ -1,6 +1,7 @@
-# strategy_narrator.py
 import re
 import random
+from agent10.rules_prompt import build_brand_rule_block
+
 
 class StrategyNarrator:
     def __init__(self, llm_client, tone_profile_map=None, pad_pool=None):
@@ -53,14 +54,12 @@ class StrategyNarrator:
             t = t.replace(p, "")
         return self._norm(t)
 
-    # TITLE: 생활 맥락 완전 배제
     def _safe_title(self, row):
         brand = self._s(row.get("brand"))
         skin = self._s(row.get("skin_concern"))
         title = f"{brand} {skin} 피부를 위한 가벼운 케어"
         return self._norm(title)[:40]
 
-    # ✅ 본문만 300~350자 맞추는 함수 (URL 제외)
     def _finalize_body_length(self, body):
         b = self._norm(body)
 
@@ -126,9 +125,11 @@ class StrategyNarrator:
 
         return self._finalize_body_length(body)
 
-    def generate(self, row: dict, plan: dict, repair_errors=None):
+    def generate(self, row: dict, plan: dict, brand_rule: dict, repair_errors=None):
         if not plan or not plan.get("message_outline"):
             raise RuntimeError("plan missing message_outline")
+
+        rule_block = build_brand_rule_block(brand_rule)
 
         title = self._safe_title(row)
         body = self._slot_template(row)
@@ -137,4 +138,11 @@ class StrategyNarrator:
         if url:
             body = f"{body} {url}"
 
-        return f"TITLE: {title}\nBODY: {body}"
+        prompt = (
+            rule_block
+            + "\n"
+            + f"TITLE: {title}\n"
+            + f"BODY: {body}"
+        )
+
+        return prompt
