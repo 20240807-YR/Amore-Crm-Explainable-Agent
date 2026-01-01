@@ -1,96 +1,148 @@
-import json
+# agent10/strategy_narrator.py
 import traceback
-
-# [Import Fix] brand_rules 파일에서 함수를 명확하게 가져옵니다.
-# (이 부분이 없으면 NameError가 발생합니다)
 from brand_rules import build_brand_rule_block
+
 
 class StrategyNarrator:
     def __init__(self, llm, tone_profile_map=None):
-        """
-        :param llm: OpenAI Client 객체 (generate 메서드에서 사용)
-        :param tone_profile_map: 페르소나별 톤 앤 매너 키워드 맵
-        """
         self.llm = llm
         self.tone_profile_map = tone_profile_map or {}
 
-    def generate(self, row: dict, plan: dict, brand_rule: dict, repair_errors: list = None):
-        """
-        LLM을 사용하여 CRM 마케팅 메시지(Title + Body)를 생성합니다.
-        기존의 딱딱한 템플릿 방식 대신, AI가 자연스럽게 작성하도록 유도합니다.
-        """
-        
-        # 1. 페르소나 및 톤 정보 준비
-        persona_id = row.get("persona_id", "Unknown")
-        # 톤 프로필이 없으면 기본값 설정
-        tone_keyword = self.tone_profile_map.get(persona_id, "친절하고 공감하는 뷰티 카운셀러 톤")
-        
-        # 2. 브랜드 규칙 블록 생성 (brand_rules.py의 함수 사용)
-        rule_block = build_brand_rule_block(brand_rule)
+    def _s(self, v):
+        return "" if v is None else str(v).strip()
 
-        # 3. 상품 정보 포맷팅
-        product_info = (
-            f"- 상품명: {row.get('상품명', '')}\n"
-            f"- URL: {row.get('URL', '')}\n"
-            f"- 고객 피부고민: {row.get('skin_concern', '복합성')}\n"
-            f"- 주요 성분/특징: {row.get('전성분', '')[:150]}..." # 너무 길면 자름
+    def _as_list(self, v):
+        if v is None:
+            return []
+        if isinstance(v, (list, tuple)):
+            return [self._s(x) for x in v if self._s(x)]
+        s = self._s(v)
+        if not s:
+            return []
+        return [t.strip() for t in s.split(",") if t.strip()]
+
+    # -------------------------------------------------
+    # ✅ 최소 가드만 유지
+    # - product_name이 비었을 때만 에러
+    # - 품질/의미/옵션/길이 판단은 하지 않음
+    # -------------------------------------------------
+    def _validate_product_name(self, product_name: str):
+        s = (product_name or "").strip()
+        if not s or s.lower() == "nan":
+            raise ValueError("[Narrator] 제품명 없음(nan/empty) → 생성 중단")
+
+    def generate(self, row: dict, plan: dict, brand_rule: dict, repair_errors: list = None):
+
+        # -------------------------------------------------
+        # 1. 핵심 식별 정보
+        # -------------------------------------------------
+        persona_id = self._s(row.get("persona_id", "Unknown"))
+        brand = self._s(row.get("brand_name_slot")) or self._s(row.get("brand", ""))
+
+        tone_keyword = self.tone_profile_map.get(
+            persona_id,
+            "차분하고 과장되지 않은 설명형 말투"
         )
 
-        # 4. 전략(Plan) 정보를 문자열로 변환
-        plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
-        
-        # 5. 시스템 프롬프트 (페르소나 부여)
+        rule_block = build_brand_rule_block(brand_rule)
+
+        # -------------------------------------------------
+        # 2. 의미 재료
+        # -------------------------------------------------
+        lifestyle = self._s(row.get("lifestyle", ""))
+        skin_concern = self._s(row.get("skin_concern", ""))
+        product_name = self._s(row.get("상품명", ""))
+
+        # ✅ 제품명 비었을 때만 중단
+        self._validate_product_name(product_name)
+
+        outline = plan.get("message_outline", []) if isinstance(plan, dict) else []
+
+        brand_must_include = self._as_list(plan.get("brand_must_include")) if isinstance(plan, dict) else []
+        if not brand_must_include:
+            brand_must_include = self._as_list(brand_rule.get("must_include"))
+
+        must_include_block = ""
+        if brand_must_include:
+            must_include_block = (
+                "[브랜드 필수어(반드시 본문에 자연스럽게 포함)]\n"
+                + "\n".join([f"- {w}" for w in brand_must_include])
+                + "\n\n"
+            )
+
+        # -------------------------------------------------
+        # 3. system_prompt
+        # -------------------------------------------------
         system_prompt = (
-            "당신은 아모레퍼시픽의 숙련된 '뷰티 카운셀러'입니다.\n"
-            f"고객의 페르소나에 맞춰 '{tone_keyword}'으로 메시지를 작성하세요.\n\n"
-            "[작성 지침]\n"
-            "1. 말투: 기계적인 번역투나 딱딱한 문어체를 피하고, 옆에서 말해주듯 자연스러운 '해요체'를 사용하세요.\n"
-            "2. 기호 금지: '유분↑', '수분→' 같은 특수기호를 절대 쓰지 말고 서술형으로 풀어쓰세요.\n"
-            "3. 구조: 고객의 고민에 먼저 공감해주고, 자연스럽게 제품을 추천하며 해결책을 제시하세요.\n"
-            "4. 길이: 모바일에서 읽기 편하게 300~350자 내외로 작성하세요.\n"
-            "5. 필수: 반드시 아래 [Brand Rule]을 준수해야 합니다.\n\n"
+            "당신은 추천을 판단하는 AI가 아닙니다.\n"
+            "이미 결정된 전략 정보를 문장으로 편집하는 편집기입니다.\n\n"
+            f"말투 가이드: {tone_keyword}\n\n"
+            "[필수 반영 정보]\n"
+            f"- 브랜드: {brand}\n"
+            f"- 라이프스타일: {lifestyle}\n"
+            f"- 피부 고민: {skin_concern}\n"
+            f"- 제품명: {product_name}\n\n"
+            f"{must_include_block}"
+            "[문장 슬롯 강제 규칙]\n"
+            "BODY는 반드시 아래 4개 슬롯을 순서대로 모두 포함해야 합니다.\n"
+            "각 슬롯은 의미적으로 분리되어야 하며, 하나라도 누락되면 실패입니다.\n\n"
+            "슬롯 1) 라이프스타일 맥락\n"
+            "슬롯 2) 피부 고민 명시\n"
+            "슬롯 3) 브랜드 + 제품 연결\n"
+            "슬롯 4) 루틴/지속 맥락\n\n"
+            "[브랜드 필수어 규칙]\n"
+            "제공된 브랜드 필수어가 있다면 BODY에 전부 포함해야 합니다.\n"
+            "단, 나열 목록처럼 쓰지 말고 문맥 안에 자연스럽게 녹여야 합니다.\n\n"
+            "[금지 사항]\n"
+            "- 메타 표현(전략/톤/설계/기획 등) 금지\n"
+            "- 구매 유도/확인 요청 문구 금지\n\n"
+            "[형식 규칙]\n"
+            "0) 출력은 정확히 2줄\n"
+            "   - TITLE: 로 시작하는 1줄\n"
+            "   - BODY: 로 시작하는 1줄\n"
+            "1) TITLE ≤ 40자\n"
+            "2) BODY 200~450자\n\n"
             f"{rule_block}\n"
         )
 
-        # 6. 사용자 프롬프트 (입력 데이터)
+        # -------------------------------------------------
+        # 4. user_prompt
+        # -------------------------------------------------
         user_prompt = (
-            "아래 고객 정보와 마케팅 전략(Plan)을 바탕으로 매력적인 CRM 메시지를 작성해줘.\n\n"
-            f"[상품 및 고객 정보]\n{product_info}\n\n"
-            f"[전략 기획(Reasoning)]\n{plan_str}\n\n"
+            "[문장 구조 참고]\n"
+            f"- 순서: {' → '.join(outline)}\n\n"
+            "위 정보를 사용해 CRM 메시지를 작성하세요.\n"
         )
 
-        # 7. 재수정(Self-Correction) 요청 처리
-        # 검증기(Verifier)에서 에러가 발견되어 재요청이 들어온 경우
         if repair_errors:
+            err_str = (
+                ", ".join(map(str, repair_errors))
+                if isinstance(repair_errors, (list, tuple))
+                else self._s(repair_errors)
+            )
             user_prompt += (
-                f"\n[🚨 수정 요청]\n"
-                f"이전 생성물에서 다음 문제가 발견되었습니다:\n{repair_errors}\n"
-                "위 지적사항을 반영하여 메시지를 다시 작성해주세요.\n"
+                "\n[REPAIR MODE]\n"
+                "4슬롯 구조를 유지하며 아래 오류만 최소 수정으로 해결하세요.\n"
+                f"- 오류 목록: {err_str}\n"
             )
 
-        # 8. 출력 형식 지정
         user_prompt += (
             "\n[출력 형식]\n"
-            "TITLE: (고객의 클릭을 유도하는 매력적인 제목)\n"
-            "BODY: (본문 내용, URL은 맨 마지막에 원본 그대로 입력)\n"
-            "주의: URL을 [링크](주소) 형태로 변환하지 마세요. http://... 주소만 남기세요.\n"
-            "형식을 꼭 지켜주세요."
+            "TITLE: (40자 이내)\n"
+            "BODY: (200~450자)\n"
         )
 
-        # 9. LLM 호출
+        # -------------------------------------------------
+        # 5. LLM 호출
+        # -------------------------------------------------
         try:
-            # llm 객체가 chat 메서드를 가지고 있다고 가정 (openai_client.py)
             response = self.llm.chat([
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ])
-            return response.strip()
-            
+            return (response or "").strip()
+
         except Exception as e:
-            print(f"[StrategyNarrator] LLM Generation Error: {e}")
+            print(f"[StrategyNarrator] Error: {e}")
             traceback.print_exc()
-            # 에러 발생 시 비상용 메시지 리턴
-            return (
-                "TITLE: 고객님을 위한 맞춤 추천\n"
-                "BODY: 죄송합니다. 메시지 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
-            )
+            raise
