@@ -1,4 +1,3 @@
-# agent10/controller.py
 import os
 import time
 import sys
@@ -180,6 +179,36 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         print("[controller] loaded brand rules:", list(brand_rules.keys()))
 
     llm = OpenAIChatCompletionClient()
+    # --- LLM compatibility patch (keep logic; only adapt call shape) ---
+    if not hasattr(llm, "generate"):
+        if hasattr(llm, "invoke"):
+            def _generate_adapter(*args, **kwargs):
+                if "messages" in kwargs and isinstance(kwargs["messages"], list):
+                    return llm.invoke(messages=kwargs["messages"], temperature=kwargs.get("temperature"))
+                if len(args) == 2 and all(isinstance(x, str) for x in args):
+                    system, user = args
+                    return llm.invoke(
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                        temperature=kwargs.get("temperature"),
+                    )
+                if len(args) == 1 and isinstance(args[0], str):
+                    return llm.invoke(
+                        messages=[{"role": "user", "content": args[0]}],
+                        temperature=kwargs.get("temperature"),
+                    )
+                return llm.invoke(*args, **kwargs)
+
+            llm.generate = _generate_adapter
+        elif hasattr(llm, "__call__"):
+            llm.generate = llm
+        elif hasattr(llm, "chat"):
+            llm.generate = llm.chat
+        else:
+            raise AttributeError("OpenAIChatCompletionClient has no callable interface")
+    # ---------------------------------------------------
     loader = CRMLoader()
     tones = ToneProfiles(DATA_DIR)
     verifier = MessageVerifier()
@@ -243,7 +272,6 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
                 product_name = fb
 
         if _is_empty_product(product_name):
-            # hard block: narrator needs product_name
             errs = ["product_missing(hard_block)"]
             if product_err:
                 errs.insert(0, product_err)
@@ -282,7 +310,13 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             print(f"[controller] row {i}/{len(rows)} generate")
 
         msg = narrator.generate(row=row, plan=plan, brand_rule=brand_rule)
-        title, body = _parse_title_body(msg)
+
+        # StrategyNarrator returns dict; controller legacy expects string
+        if isinstance(msg, dict):
+            title = msg.get("title_line", "TITLE:")
+            body = msg.get("body_line", "BODY:")
+        else:
+            title, body = _parse_title_body(msg)
 
         clean_body = body.replace("BODY:", "", 1).strip()
         clean_body = enforce_brand_must_include(clean_body, plan.get("brand_must_include") or [])
@@ -291,7 +325,10 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         errs = verifier.validate(row, title, body)
         errs.extend(verify_brand_rules(clean_body, brand_rule))
 
-        if _looks_like_refusal(msg):
+        _refusal_text = msg
+        if isinstance(msg, dict):
+            _refusal_text = msg.get("body") or msg.get("body_line") or ""
+        if _looks_like_refusal(_refusal_text if isinstance(_refusal_text, str) else str(_refusal_text)):
             errs = list(errs) + ["llm_refusal_like"]
 
         results.append({

@@ -125,7 +125,15 @@ sample = results[0]
 print("\n" + "=" * 70)
 print("[MESSAGE OUTPUT]")
 print("=" * 70)
-print(sample.get("message", ""), flush=True)
+msg = sample.get("message", "")
+if isinstance(msg, dict):
+    # StrategyNarrator returns dict with title_line/body_line
+    title_line = msg.get("title_line", "")
+    body_line = msg.get("body_line", "")
+    print(title_line, flush=True)
+    print(body_line, flush=True)
+else:
+    print(msg, flush=True)
 
 # -------------------------------------------------
 # 7. Plan 출력
