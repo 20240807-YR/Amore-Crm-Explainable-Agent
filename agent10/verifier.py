@@ -36,8 +36,6 @@ class MessageVerifier:
             "지속", "계속", "이어", "관리", "습관"
         ]
 
-        # URL 패턴 (마크다운 링크는 별도 차단)
-        self.url_pattern = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
     # -------------------------------------------------
     # helpers
@@ -122,21 +120,6 @@ class MessageVerifier:
                     return True
         return False
 
-    def _extract_urls(self, text: str):
-        return self.url_pattern.findall(text or "")
-
-    def _url_is_last(self, body: str, url: str) -> bool:
-        """
-        URL이 BODY의 마지막에 위치하는지 검사.
-        - trailing punctuation(.,), 공백 정도는 허용
-        """
-        b = self._s(body)
-        if not b or not url:
-            return False
-        tail = b.strip()
-        # 끝의 흔한 구두점/괄호 제거
-        tail = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", tail)
-        return tail.endswith(url)
 
     def _contains_meta_banned(self, body: str) -> list:
         found = []
@@ -186,22 +169,11 @@ class MessageVerifier:
             errs.append("body_len>350")
 
         # -------------------------------------------------
-        # 4. URL 규칙 (강제)
-        #  - 정확히 1회 포함
+        # 4. 링크/CTA 형식 금지 (유지)
         #  - 마크다운 링크 금지
-        #  - URL은 마지막에 위치
         # -------------------------------------------------
         if re.search(r"\[.*?\]\(https?://", body):
             errs.append("markdown_link_banned")
-
-        urls = self._extract_urls(body)
-        if len(urls) == 0:
-            errs.append("url_missing")
-        elif len(urls) > 1:
-            errs.append("url_count>1")
-        else:
-            if not self._url_is_last(body, urls[0]):
-                errs.append("url_not_last")
 
         # -------------------------------------------------
         # 5. 브랜드 포함 여부 (강제: title 또는 body에 존재)
@@ -222,8 +194,6 @@ class MessageVerifier:
         # 7. 라이프스타일 / 피부 고민 (강제: 존재)
         # -------------------------------------------------
         lifestyle = self._s(row.get("lifestyle"))
-        if lifestyle and not self._loose_contains(lifestyle, body):
-            errs.append("lifestyle_missing")
 
         skin = self._s(row.get("skin_concern"))
         if skin and not self._loose_contains(skin, body):
@@ -303,11 +273,6 @@ class MessageVerifier:
             if self._has_duplicate_sentences([s1, s2, s3, s4]):
                 errs.append("duplicate_sentence")
 
-        # -------------------------------------------------
-        # 9. 루틴/지속 맥락 (전체 BODY에서도 최소 1회)
-        # -------------------------------------------------
-        if not self._has_routine_context(body):
-            errs.append("routine_context_missing")
 
         # -------------------------------------------------
         # 10. 메타/금지 표현 (강제 차단)

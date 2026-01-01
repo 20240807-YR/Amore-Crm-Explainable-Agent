@@ -84,6 +84,19 @@ class OpenAIChatCompletionClient:
         return: str
         """
 
+        # -------------------------------------------------
+        # type guard: OpenAI API requires list[{"role","content"}]
+        # Some upstream code may accidentally pass a string.
+        # We coerce string -> [{"role":"user","content": <string>}]
+        # so the request does not 400, while printing a clear debug line.
+        # -------------------------------------------------
+        if isinstance(messages, str):
+            print("[OpenAIClient] WARN: messages was str -> coercing to chat list")
+            messages = [{"role": "user", "content": messages}]
+        elif messages is not None and not isinstance(messages, list):
+            print(f"[OpenAIClient] WARN: messages type={type(messages)} -> using dummy response")
+            return self._dummy_response()
+
         # 🔥 실제 호출 직전 라우팅 디버그 (판별용 핵심 로그)
         print(
             "[LLM ROUTE DEBUG]",
@@ -130,6 +143,8 @@ class OpenAIChatCompletionClient:
     def generate(self, messages=None, system=None, user=None, temperature=0.7):
         # StrategyNarrator may call generate(messages=...)
         if messages is not None:
+            if isinstance(messages, str):
+                print("[OpenAIClient] WARN: generate(messages=...) received str; coercing")
             return self.chat(messages=messages, temperature=temperature)
 
         # Or generate(system, user) style
