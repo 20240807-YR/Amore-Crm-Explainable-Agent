@@ -1,61 +1,114 @@
+# agent10/openai_client.py
 import os
-from openai import OpenAI
+import time
+
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
 
 class OpenAIChatCompletionClient:
-    def __init__(self, model="gpt-4o"):
-        """
-        OpenAI API 클라이언트 초기화
-        :param model: 사용할 모델명 (gpt-4o, gpt-4-turbo, gpt-3.5-turbo 등)
-        """
-        # 환경변수에서 API 키를 가져옵니다.
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        self.offline = False
+    """
+    OpenAI ChatCompletion Client (Ollama 완전 차단 버전)
 
-        if not self.api_key:
-            print("[Warning] OPENAI_API_KEY not found. Running in OFFLINE mode (Mock response).")
-            self.offline = True
-            self.client = None
-        else:
-            try:
-                self.client = OpenAI(api_key=self.api_key)
-            except Exception as e:
-                print(f"[Error] OpenAI Client init failed: {e}")
-                self.offline = True
+    - 모델: gpt-4o-mini (저렴 + 안정)
+    - 환경변수: OPENAI_API_KEY 필수
+    - OPENAI_OFFLINE=1 이면 더미 응답
+    - Ollama / localhost / 로컬 LLM 경로 전부 무시
+    - 항상 str 반환
+    """
+
+    def __init__(self, model="gpt-4o-mini"):
+        # -------------------------------------------------
+        # 🔥 Ollama 강제 차단 (환경변수 레벨)
+        # -------------------------------------------------
+        os.environ.pop("OLLAMA_BASE_URL", None)
+        os.environ.pop("DISABLE_OLLAMA", None)
+        os.environ.pop("OLLAMA_HOST", None)
 
         self.model = model
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.offline = os.getenv("OPENAI_OFFLINE", "0") == "1"
 
+        self.client = None
+
+        if self.offline:
+            print("[OpenAIClient] OPENAI_OFFLINE=1 -> OFFLINE mode")
+            return
+
+        if not self.api_key:
+            print("[OpenAIClient] OPENAI_API_KEY not found -> OFFLINE mode")
+            self.offline = True
+            return
+
+        if OpenAI is None:
+            print("[OpenAIClient] openai package not available -> OFFLINE mode")
+            self.offline = True
+            return
+
+        try:
+            self.client = OpenAI(api_key=self.api_key)
+        except Exception as e:
+            print(f"[OpenAIClient] OpenAI init failed: {e}")
+            self.offline = True
+            self.client = None
+
+    # -------------------------------------------------
+    # utils
+    # -------------------------------------------------
+    def _dummy_response(self):
+        return (
+            "TITLE: [오프라인 모드]\n"
+            "BODY: OPENAI_API_KEY가 없거나 OpenAI 호출이 비활성화되어 있습니다."
+        )
+
+    # -------------------------------------------------
+    # main
+    # -------------------------------------------------
     def chat(self, messages, temperature=0.7):
         """
-        Chat Completion API를 호출합니다.
-        :param messages: [{"role": "system", "content": "..."}, ...] 형태의 리스트
-        :return: 모델이 생성한 텍스트 (str)
+        messages: [{"role": "system"|"user"|"assistant", "content": "..."}]
+        return: str
         """
-        # 1. 오프라인 모드(API 키 없음)이거나 에러 발생 시 더미 응답 반환
         if self.offline or not self.client:
-            return (
-                "TITLE: [오프라인 모드] 제목 예시\n"
-                "BODY: 현재 OpenAI API 키가 없거나 오프라인 상태입니다. "
-                "이것은 테스트용 더미 응답입니다. API 키를 설정해주세요."
-            )
+            return self._dummy_response()
 
-        # 2. 실제 API 호출
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-            )
-            return response.choices[0].message.content
+        if not messages:
+            return self._dummy_response()
 
-        except Exception as e:
-            print(f"[OpenAIClient] API Request Error: {e}")
-            return "TITLE: 에러 발생\nBODY: API 호출 중 오류가 발생했습니다."
+        max_attempts = 3
+        backoff = 1.5
+        last_err = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=float(temperature),
+                )
+                content = resp.choices[0].message.content
+                return (content or "").strip() or "TITLE:\nBODY:"
+            except Exception as e:
+                last_err = e
+                print(f"[OpenAIClient] API Request Error (attempt {attempt}): {e}")
+                if attempt < max_attempts:
+                    time.sleep(backoff ** attempt)
+                    continue
+                break
+
+        return (
+            "TITLE: 오류 발생\n"
+            "BODY: OpenAI API 호출 중 오류가 발생했습니다."
+        )
+
 
 if __name__ == "__main__":
-    # 테스트 코드
+    # 단독 테스트
     client = OpenAIChatCompletionClient()
     res = client.chat([
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Hello!"}
     ])
-    print("Response:", res)
+    print(res)

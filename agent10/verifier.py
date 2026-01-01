@@ -4,7 +4,7 @@ import re
 
 class MessageVerifier:
     def __init__(self):
-        # 메타/기획/CTA 금지어
+        # 메타/기획/CTA 금지어 (강제 차단)
         self.meta_ban = [
             "브랜드 톤을 유지하며",
             "브랜드 톤을 살려",
@@ -18,6 +18,15 @@ class MessageVerifier:
             "더 알아보려면",
         ]
 
+        # 루틴/지속 맥락 키워드 (느슨)
+        self.routine_keywords = [
+            "아침", "저녁", "루틴", "매일", "일상", "반복",
+            "지속", "계속", "이어", "관리"
+        ]
+
+    # -------------------------------------------------
+    # helpers
+    # -------------------------------------------------
     def _s(self, v):
         return "" if v is None else str(v).strip()
 
@@ -25,6 +34,9 @@ class MessageVerifier:
         return [t for t in re.split(r"[^\w가-힣]+", text) if len(t) >= 2]
 
     def _loose_contains(self, source, target):
+        """
+        source 토큰 중 하나라도 target에 있으면 통과
+        """
         if not source:
             return True
         tokens = self._tokenize(source)
@@ -33,10 +45,11 @@ class MessageVerifier:
         return any(tok in target for tok in tokens)
 
     def _has_routine_context(self, body):
-        return any(k in body for k in [
-            "아침", "저녁", "루틴", "매일", "일상", "반복", "지속"
-        ])
+        return any(k in body for k in self.routine_keywords)
 
+    # -------------------------------------------------
+    # main
+    # -------------------------------------------------
     def validate(self, row: dict, title_line: str, body_line: str):
         errs = []
 
@@ -63,7 +76,7 @@ class MessageVerifier:
             errs.append("title_len>40")
 
         # -------------------------------------------------
-        # 3. 본문 길이
+        # 3. 본문 길이 (완화)
         # -------------------------------------------------
         if len(body) < 200:
             errs.append("body_len<200")
@@ -71,23 +84,21 @@ class MessageVerifier:
             errs.append("body_len>450")
 
         # -------------------------------------------------
-        # 4. 브랜드 포함 여부
+        # 4. 브랜드 포함 여부 (느슨)
         # -------------------------------------------------
         brand = self._s(row.get("brand_name_slot")) or self._s(row.get("brand"))
         if brand and brand not in body:
             errs.append("brand_missing")
 
         # -------------------------------------------------
-        # 5. 제품명 "반영 여부"만 체크 (품질 판단/invalid_product_name 없음)
+        # 5. 제품명 포함 여부 (토큰 기준)
         # -------------------------------------------------
         prod = self._s(row.get("상품명"))
-        if prod:
-            # 옵션/용량이 섞여있어도 '토큰 일부'만 들어가면 통과시키는 느슨한 검증
-            if not self._loose_contains(prod, body):
-                errs.append("product_missing")
+        if prod and not self._loose_contains(prod, body):
+            errs.append("product_missing")
 
         # -------------------------------------------------
-        # 6. 라이프스타일 / 피부 고민
+        # 6. 라이프스타일 / 피부 고민 (존재 여부만)
         # -------------------------------------------------
         lifestyle = self._s(row.get("lifestyle"))
         if lifestyle and not self._loose_contains(lifestyle, body):
@@ -98,13 +109,13 @@ class MessageVerifier:
             errs.append("skin_concern_missing")
 
         # -------------------------------------------------
-        # 7. 루틴 맥락
+        # 7. 루틴/지속 맥락 (의미 유사 허용)
         # -------------------------------------------------
         if not self._has_routine_context(body):
             errs.append("routine_context_missing")
 
         # -------------------------------------------------
-        # 8. 메타/금지 표현
+        # 8. 메타/금지 표현 (강제 차단)
         # -------------------------------------------------
         for p in self.meta_ban:
             if p and p in body:
@@ -120,13 +131,14 @@ class MessageVerifier:
 
 
 # -------------------------------------------------
-# 브랜드 규칙 검증
+# 브랜드 규칙 검증 (완화 버전)
 # -------------------------------------------------
 def verify_brand_rules(text, rule):
     errors = []
     if not rule:
         return errors
 
+    # 금지어: 그대로 엄격
     banned = str(rule.get("banned", ""))
     if banned and banned.lower() != "nan":
         for w in banned.split(","):
@@ -134,6 +146,7 @@ def verify_brand_rules(text, rule):
             if w and w in text:
                 errors.append(f"브랜드 금지어 포함됨: {w}")
 
+    # 필수어: 토큰 하나라도 있으면 통과
     must = str(rule.get("must_include", ""))
     if must and must.lower() != "nan":
         for w in must.split(","):
@@ -144,6 +157,7 @@ def verify_brand_rules(text, rule):
             if tokens and not any(tok in text for tok in tokens):
                 errors.append(f"브랜드 필수어 누락됨: {w}")
 
+    # 지양어: 그대로 차단
     avoid = str(rule.get("avoid", ""))
     if avoid and avoid.lower() != "nan":
         for w in avoid.split(","):
