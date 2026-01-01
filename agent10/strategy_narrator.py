@@ -244,6 +244,13 @@ BODY: 출근 전 바쁜 아침, 사무실 에어컨과 마스크로 속건조와
 프리메라의 NEW 나이아시카 수딩 글로우 워터리 크림 30ml가 가볍게 수분을 채워줄 거예요
 세안 후 토너로 정리하고 쓱 바르면 아침/저녁 3-4단계 루틴에 쉽게 녹아들어요.
 {brand_name}와 함께라면 사용감, 루틴 내 위치, 지속 가능성 측면에서도 부담 없이 이어갈 수 있습니다!
+
+[작성 예시 4]
+TITLE: 🌼바쁜 아침, 프리메라와 함께 피부 걱정 끝내요!🌼
+BODY: 아침 출근 준비로 바쁜 하루가 시작되면 피부 속건조가 더욱 신경 쓰이죠.
+사무실 에어컨과 마스크로 피부가 푸석해질 때 프리메라 NEW 나이아시카 수딩 글로우 워터리 크림 30ml가 가볍게 수분을 채워줘요.
+세안 후 토너 다음 단계에서 얇게 펴 바르면 아침 루틴에도 부담 없이 스며들어 사용감이 편안해요.
+루틴 내 위치를 고민하지 않아도 매일 이어가기 쉬워 지속 가능성 측면에서도 자연스럽게 관리할 수 있어요.
 """ + f"\n- 참고 톤 키워드: {list(self.tone_profile_map.keys())}\n"
 
     def _build_user_prompt(
@@ -436,6 +443,14 @@ BODY: 출근 전 바쁜 아침, 사무실 에어컨과 마스크로 속건조와
             out_text = out.get("text", "") if isinstance(out, dict) else str(out)
             out_text = self._s(out_text)
 
+            # --- normalize nested TITLE/BODY inside BODY ---
+            if "TITLE:" in out_text and "BODY:" in out_text:
+                try:
+                    _t, _b = out_text.split("BODY:", 1)
+                    out_text = _b.strip()
+                except Exception:
+                    pass
+
             # Guard: If LLM returned empty, skip to next attempt
             if not out_text:
                 last_errs = ["llm_empty_output"]
@@ -500,6 +515,27 @@ BODY: 출근 전 바쁜 아침, 사무실 에어컨과 마스크로 속건조와
             if not errs:
                 return f"TITLE:\n{title}\nBODY:\n{body}"
 
+            # --- LLM self-feedback loop ---
+            feedback_prompt = (
+                "아래는 네가 방금 작성한 마케팅 메시지다.\n"
+                "이 메시지가 제약을 완전히 만족하지 못한 이유가 무엇인지 스스로 점검하고,\n"
+                "문제점만 간단히 정리한 뒤 그 내용을 반영해 다시 작성하라.\n\n"
+                "[문제 목록]\n- " + "\n- ".join(errs) +
+                "\n\n[현재 메시지]\n"
+                f"TITLE:\n{title}\nBODY:\n{body}\n"
+            )
+
+            feedback_messages = [
+                {"role": "system", "content": system_p},
+                {"role": "user", "content": feedback_prompt},
+            ]
+
+            fb_out = self.llm.generate(messages=feedback_messages)
+            fb_text = fb_out.get("text", "") if isinstance(fb_out, dict) else str(fb_out)
+            fb_text = self._s(fb_text)
+
+            if fb_text:
+                free_text = fb_text
             last_errs = errs
             last_title, last_body = title, body
 
