@@ -61,12 +61,13 @@ def _parse_title_body(msg: str):
         return "TITLE: 제목 없음", "BODY:"
 
     lines = s.splitlines()
-    if (
-        len(lines) >= 2
-        and lines[0].startswith("TITLE:")
-        and lines[1].startswith("BODY:")
-    ):
-        return lines[0].strip(), lines[1].strip()
+    if len(lines) >= 2 and lines[0].startswith("TITLE:") and lines[1].startswith("BODY:"):
+        title = lines[0].strip()
+        body_lines = [lines[1].replace("BODY:", "", 1).strip()]
+        if len(lines) > 2:
+            body_lines.extend([ln.strip() for ln in lines[2:] if ln.strip()])
+        body = "BODY: " + "\n".join(body_lines)
+        return title, body
 
     return "TITLE: 제목 없음", "BODY: " + s
 
@@ -140,26 +141,6 @@ def _global_product_fallback() -> str:
         if s and s.lower() != "nan":
             return s
     return ""
-
-
-# -------------------------------------------------
-# brand must-include enforcement
-# -------------------------------------------------
-def enforce_brand_must_include(body: str, must_words):
-    if not body or not must_words:
-        return body
-
-    missing = [w for w in must_words if w and (w not in body)]
-    if not missing:
-        return body
-
-    addon = " 이 과정에서 " + ", ".join(missing) + " 측면에서도 부담 없이 이어갈 수 있다."
-
-    new_body = body.rstrip()
-    if not new_body.endswith("."):
-        new_body += "."
-    new_body += addon
-    return new_body.strip()
 
 
 # -------------------------------------------------
@@ -319,7 +300,6 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             title, body = _parse_title_body(msg)
 
         clean_body = body.replace("BODY:", "", 1).strip()
-        clean_body = enforce_brand_must_include(clean_body, plan.get("brand_must_include") or [])
         body = "BODY: " + clean_body
 
         errs = verifier.validate(row, title, body)
