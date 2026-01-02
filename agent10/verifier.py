@@ -25,13 +25,36 @@ class MessageVerifier:
     def _has_skin_concern(self, text: str, concerns: List[str]) -> bool:
         if not concerns:
             return True
+
+        # Whitespace-insensitive match to tolerate natural spacing (e.g., "속 건조" vs "속건조").
+        norm_text = re.sub(r"\s+", "", text or "")
+        norm_concerns = [re.sub(r"\s+", "", c or "").strip() for c in concerns]
+        norm_concerns = [c for c in norm_concerns if c]
+        if not norm_concerns:
+            return True
+
         # all concerns must appear at least once (loose match)
-        return all(c in text for c in concerns)
+        return all(c in norm_text for c in norm_concerns)
 
     def _count_slots(self, body: str) -> int:
-        # slots are sentence-level lines separated by newline
+        """Count content slots.
+
+        Primary rule: newline-separated lines.
+        Fallback: if fewer than 4 lines, count sentence-like chunks to tolerate
+        connected prose while preserving the "at least 4" structural intent.
+        """
+        if not body:
+            return 0
+
         lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
-        return len(lines)
+        if len(lines) >= 4:
+            return len(lines)
+
+        # Fallback sentence-ish counting (no lookbehind; robust for Korean/EN punctuation).
+        # Counts chunks ending with . ! ? or the final trailing chunk.
+        chunks = re.findall(r"[^.!?]+[.!?]|[^.!?]+$", body)
+        chunks = [c.strip() for c in chunks if c and c.strip()]
+        return len(chunks)
 
     def _body_len_ok(self, body: str) -> bool:
         return MIN_BODY_LEN <= len(body) <= MAX_BODY_LEN

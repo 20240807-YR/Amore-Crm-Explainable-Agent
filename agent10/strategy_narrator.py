@@ -79,6 +79,17 @@ class StrategyNarrator:
             return " ".join(parts).strip()
         return self._s(v)
 
+    def _lifestyle_phrase(self, lifestyle: str) -> str:
+        s = self._s(lifestyle)
+        if not s:
+            return ""
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        if len(parts) <= 1:
+            return s
+        if len(parts) == 2:
+            return f"{parts[0]}에 {parts[1]}까지 겹치는 날엔"
+        return f"{parts[0]}에 {parts[1]} 바람까지 맞고, {parts[2]}도 잦은 날엔"
+
     def _get_url(self, row: Dict[str, Any]) -> str:
         for k in ["url", "URL", "product_url", "productURL", "상품URL", "상품_url", "link", "링크"]:
             v = self._s(row.get(k))
@@ -236,30 +247,35 @@ class StrategyNarrator:
         """
         시스템 프롬프트: STRICT SLOT-ONLY, TITLE/BODY 예시·라벨·구조 금지
         """
-        return f"""당신은 {brand_name}의 전문 마케팅 카피라이터입니다.
+        return """
+너는 고객 상담자나 CS 직원이 아니다.
+너는 내부 마케팅 담당자다.
 
-[중요]
-- 당신의 출력은 **오직 4개의 슬롯 문장만** 허용됩니다.
-- TITLE, BODY, 제목, 본문, 사용감, 루틴 내 위치, 지속 가능성 같은 라벨 단어를 절대 쓰지 마세요.
+목표:
+- 설명이 아니라 '제안형 광고 문구'를 작성한다.
+- 독자가 한 번에 읽히는 하나의 흐름을 만든다.
+- 문장 간 단절을 금지한다.
 
-[출력 형식 — 반드시 이 형식만 사용]
-slot1_text: 라이프스타일/환경 공감 문장 1~2개
-slot2_text: 피부 고민 + 제품(상품명 포함) 설명 문장 1~2개
-slot3_text: 사용 순서/시간대/단계가 드러나는 루틴 문장 1~2개
-slot4_text: 꾸준함/관리 주기/부담 없는 마무리 문장 1~2개
+핵심 사고 규칙:
+- 각 슬롯은 독립 문장이 아니다.
+- 다음 슬롯은 반드시 이전 슬롯의 마지막 의미를 받아 이어 말해야 한다.
+- 질문 → 제안 → 사용 장면 → 완곡한 마무리 흐름을 유지한다.
 
-[문체]
-- 반드시 해요체만 사용
-- '~이다/~한다/~있다/~합니다' 금지
+말하기 규칙:
+- slot1 끝은 질문형 또는 공감형 종결을 사용한다.
+- slot2는 반드시 연결어(이럴 때, 그래서, 이렇게)를 포함해 slot1을 이어간다.
+- slot3은 사용 방법을 설명하지 말고, slot2 문장 안에서 자연스럽게 이어 붙인다는 사고로 작성한다.
+- slot4는 감탄사·이모지·완곡 표현으로 가볍게 닫는다.
 
-[금지]
-- TITLE/BODY/slot 라벨 외 다른 형식 금지
-- 링크/URL/CTA 문구 금지
+허용 표현:
+- "~느껴지죠?", "~이럴 때는", "~어떨까요?"
+- "~부담 없이", "~가볍게 이어가요"
+- "오늘 같은 컨디션에는"
 
-[의미 지시 — 단어 그대로 사용 금지]
-- '사용감'이라는 단어를 쓰지 말고, 발림/흡수/가벼움/끈적임 없음의 의미로 표현하세요.
-- '루틴 내 위치'라는 단어를 쓰지 말고, 세안 후/토너 다음/아침·저녁 루틴 등의 의미로 표현하세요.
-- '지속 가능성'이라는 단어를 쓰지 말고, 매일 부담 없음/꾸준히 쓰기 쉬움/관리 주기의 의미로 표현하세요.
+금지:
+- 정보 나열식 설명
+- 문장 간 끊김이 느껴지는 전개
+- 설명체/하다체/~이다/~합니다
 """
 
     def _build_user_prompt(
@@ -395,7 +411,8 @@ slot4_text: 꾸준함/관리 주기/부담 없는 마무리 문장 1~2개
 
         # NOTE: BODY에는 plan.lifestyle_expanded 덤프가 흘러가면 verifier(4줄/길이) 기준이 깨짐.
         # BODY/프롬프트에는 row.lifestyle(짧은 원문)만 사용.
-        lifestyle = self._as_text(row.get("lifestyle", ""))
+        lifestyle_raw = self._as_text(row.get("lifestyle", ""))
+        lifestyle_phrase = self._lifestyle_phrase(lifestyle_raw)
 
         # -------------------------
         # must_include 의미화 (단어 자체 금지)
@@ -439,19 +456,14 @@ slot4_text: 꾸준함/관리 주기/부담 없는 마무리 문장 1~2개
             concerns = [c.strip() for c in self._s(skin_concern).split(",") if c.strip()]
             concerns_str = ",".join(concerns) if concerns else self._s(skin_concern)
 
-            l1 = f"{lifestyle} 환경에서는 피부가 쉽게 건조해지고 번들거림도 같이 느껴져요. 컨디션이 하루에 여러 번 흔들릴 수 있어요."
-            # slot2: product_anchor + skin_concern 토큰 전부 literal 포함(축약/별칭 금지)
-            l2 = (
-                f"{concerns_str}가 신경 쓰일 때는 {product_anchor}로 균형을 잡아줘요. "
-                "가볍게 스며들어 겉은 번들거리지 않게 정돈돼요."
-            )
-            # slot3: 루틴/시간대/단계 마커 필수
-            l3 = "세안 후 토너 다음 단계에서 얇게 펴 발라요. 아침·저녁 루틴에서 필요한 부위만 한 겹 더 레이어링해요."
-            # slot4: brand literal 포함 + 구매 텀 완곡
-            l4 = (
-                "최근 관리 텀이 조금 길어졌더라도 괜찮아요. "
-                f"{brand_name}로 다시 시작해도 부담 없이 이어갈 수 있어요."
-            )
+            # slot1: 광고 첫 문장. 상황 공감 또는 오늘/요즘 컨디션 언급.
+            l1 = f"요즘처럼 {lifestyle_phrase} 환경에서는 피부 컨디션이 쉽게 달라질 수 있어요."
+            # slot2: 문제 인식 후 제품을 '제안'하는 문장. 설명 금지.
+            l2 = f"{concerns_str}이 신경 쓰일 때는 {product_anchor}을 한 번 써보는 건 어떨까요?"
+            # slot3: 사용 장면을 떠올리게 하는 루틴/상황 연결 문장.
+            l3 = "세안 후 토너 다음 단계에서 가볍게 발라주면, 일상 루틴에 부담 없이 더할 수 있어요."
+            # slot4: 부담 없는 재사용/구매를 암시하는 완곡한 마무리 문장.
+            l4 = "최근 관리 텀이 조금 길어졌더라도 괜찮아요. 오늘 컨디션에 맞춰 가볍게 다시 시작해보세요."
             return [self._hard_clean(l1), self._hard_clean(l2), self._hard_clean(l3), self._hard_clean(l4)]
 
         def _validate_slots(slots: List[str]) -> None:
@@ -488,6 +500,11 @@ slot4_text: 꾸준함/관리 주기/부담 없는 마무리 문장 1~2개
                     "- '~이다/~한다/~있다/~합니다' 금지\n"
                     "- 링크/URL/클릭/구매하기/더 알아보기 등 CTA 문구 금지\n"
                     "- '사용감','루틴 내 위치','지속 가능성' 단어 자체 금지\n"
+                    "\n"
+                    "[문장 연결 강제 규칙]\n"
+                    "- slot2는 slot1의 질문이나 상황을 직접 받아 시작해야 한다.\n"
+                    "- slot3은 새로운 문단처럼 쓰지 말고, slot2의 제안 문장을 이어 확장한다.\n"
+                    "- 각 슬롯은 읽었을 때 하나의 광고 문단처럼 자연스럽게 연결되어야 한다.\n"
                 )
 
                 user_p = f"""
@@ -550,20 +567,30 @@ slot4_text: ...
         concerns = [c.strip() for c in self._s(skin_concern).split(",") if c.strip()]
         concerns_str = ",".join(concerns) if concerns else self._s(skin_concern)
 
-        def _build_strict_slots(base_slots: Optional[List[str]] = None) -> List[str]:
-            # base_slots가 있어도 literal 토큰이 빠지면 강제로 다시 조립
-            s1 = f"{lifestyle} 환경에서는 피부가 쉽게 건조해지고 번들거림도 같이 느껴져요. 컨디션이 하루에 여러 번 흔들릴 수 있어요."
+        def _build_strict_slots() -> List[str]:
+            s1 = (
+                f"{lifestyle_phrase} 피부가 쉽게 건조해지면서 번들거림도 같이 느껴지죠? "
+                "컨디션이 하루에 여러 번 흔들릴 수 있어요."
+            )
             s2 = (
-                f"{concerns_str}가 신경 쓰일 때는 {product_anchor}로 균형을 잡아줘요. "
-                "가볍게 스며들어 겉은 번들거리지 않게 정돈돼요."
+                f"이럴 때 {concerns_str}까지 신경 쓰이면, {product_anchor}로 "
+                "균형을 잡아주는 건 어떨까요? 가볍게 스며들어 겉은 번들거리지 않게 정돈돼요."
             )
-            s3 = "세안 후 토너 다음 단계에서 얇게 펴 발라요. 아침·저녁 루틴에서 필요한 부위만 한 겹 더 레이어링해요."
+            s3 = (
+                "세안 후 토너 다음 단계에서 얇게 펴 바르고, "
+                "아침·저녁 루틴에서 필요한 부위만 한 겹 더 레이어링해도 좋아요."
+            )
             s4 = (
-                "최근 관리 텀이 조금 길어졌더라도 괜찮아요. "
-                f"{brand_name}로 다시 시작해도 부담 없이 이어갈 수 있어요."
+                f"최근 관리 텀이 조금 길어졌더라도 괜찮아요. "
+                f"{brand_name}로 부담 없이 다시 시작해도 이어가기 쉬워요. "
+                "오늘 컨디션에 맞춰 가볍게 얹기 좋아요."
             )
-            out = [self._hard_clean(s1), self._hard_clean(s2), self._hard_clean(s3), self._hard_clean(s4)]
-            return out
+            return [
+                self._hard_clean(s1),
+                self._hard_clean(s2),
+                self._hard_clean(s3),
+                self._hard_clean(s4),
+            ]
 
         # 1) LLM 슬롯이 있으면 우선 사용하되, verifier literal 조건을 만족하지 못하면 즉시 strict 슬롯로 교체
         if not slots:
@@ -571,12 +598,6 @@ slot4_text: ...
         else:
             joined = "\n".join([self._s(x) for x in slots])
             need_strict = False
-            if brand_name and brand_name not in joined:
-                need_strict = True
-            if product_anchor and product_anchor not in joined:
-                need_strict = True
-            if concerns and not all(c in joined for c in concerns):
-                need_strict = True
             # 4줄 구조가 깨졌거나 비어있는 줄이 생기면 strict로 교체
             lines_tmp = [ln for ln in self._split_4lines(joined) if self._s(ln)]
             if len(lines_tmp) < 4:
@@ -618,7 +639,7 @@ slot4_text: ...
 브랜드: {brand_name}
 제품: {product_name}
 피부 고민: {skin_concern}
-라이프스타일: {lifestyle}
+라이프스타일: {lifestyle_phrase}
 
 위 정보를 참고해 25~40자 제목을 작성하세요.
 - 이모지 1~2개 포함
@@ -637,7 +658,7 @@ slot4_text: ...
             brand_name,
             product_name,
             skin_concern,
-            lifestyle,
+            lifestyle_phrase,
         )
 
         return f"TITLE: {title}\nBODY: {body}"

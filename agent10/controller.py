@@ -319,14 +319,6 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         clean_body = body.replace("BODY:", "", 1).strip()
         body = "BODY: " + clean_body
 
-        # --- slot shape sanity check (controller-level) ---
-        # ensure at least 4 logical lines for verifier
-        lines = [ln for ln in clean_body.splitlines() if ln.strip()]
-        if len(lines) < 4:
-            # pad with a minimal routine line to preserve slot3
-            clean_body = clean_body + "\n오늘 루틴에서도 자연스럽게 이어서 사용해요."
-            body = "BODY: " + clean_body
-
         # Validate ONLY the primary (top-1) message.
         # top-k rows are candidates/comparisons; validating them causes brand_missing by design.
         if i == 1:
