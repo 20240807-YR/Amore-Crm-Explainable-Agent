@@ -44,7 +44,9 @@ class MessageVerifier:
 
         Policy:
           - If concerns are not provided (empty list), do NOT validate (always pass).
-          - If concerns are provided, require that **at least one** concern appears in body.
+          - If concerns are provided, accept either:
+              (a) at least one concern appears, OR
+              (b) a neutral / general skin-condition phrase appears.
 
         Notes:
           - Whitespace-insensitive match to tolerate natural spacing.
@@ -56,12 +58,28 @@ class MessageVerifier:
 
         # Whitespace-insensitive match (e.g., "속 건조" vs "속건조")
         norm_text = re.sub(r"\s+", "", text or "")
+
         norm_concerns = [re.sub(r"\s+", "", c or "").strip() for c in concerns]
         norm_concerns = [c for c in norm_concerns if c]
         if not norm_concerns:
             return True
 
-        # Require at least ONE concern when concerns exist.
+        # Neutral fallback terms ("중앙값" 처리): allow generic skin-condition wording
+        # so marketing copy is not forced to expose explicit concerns.
+        neutral_terms = [
+            "피부컨디션",
+            "피부상태",
+            "피부밸런스",
+            "피부결",
+            "피부기초",
+            "전반적인피부",
+            "데일리케어",
+        ]
+
+        if any(t in norm_text for t in neutral_terms):
+            return True
+
+        # Require at least ONE concern when concerns exist (unless neutral fallback hit).
         return any(c in norm_text for c in norm_concerns)
 
     def _count_slots(self, body: str) -> int:
@@ -187,10 +205,18 @@ class MessageVerifier:
         if not self._has_product(body, product_anchor):
             errors.append("product_missing")
 
-        # Skin concern check (body)
+        # Skin concern check (title + body)
         # OPTIONAL: only validate when persona provides skin_concern.
-        if skin_concerns and (not self._has_skin_concern(body, skin_concerns)):
-            errors.append("skin_concern_missing")
+        # Marketing copy may mention concerns in TITLE rather than BODY, so we validate on combined text.
+        combined_text = f"{title}\n{body}"
+
+        if skin_concerns and (not self._has_skin_concern(combined_text, skin_concerns)):
+            # Default: do NOT fail hard for missing concern wording in marketing copy.
+            # If strict mode is desired, flip this to errors.
+            if self.strict:
+                errors.append("skin_concern_missing")
+            else:
+                warnings.append("skin_concern_missing")
 
         # Slot count check (require at least 4 lines)
         if self._count_slots(body) < 4:
@@ -227,6 +253,11 @@ class MessageVerifier:
         skin_concern_raw = ""
         if isinstance(row, dict):
             skin_concern_raw = row.get("skin_concern") or row.get("skin_concern_raw") or ""
+
+        # If persona intentionally has no explicit skin_concern, pass a neutral default downstream
+        # so the system does not force explicit concern exposure.
+        if not (skin_concern_raw or "").strip():
+            skin_concern_raw = "피부 컨디션"
 
         product_anchor = ""
         if isinstance(row, dict):
