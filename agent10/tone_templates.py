@@ -1,4 +1,6 @@
 # tone_templates.py
+# Purpose: Shared tone/lifestyle phrase pools for StrategyNarrator.
+# This module is intentionally imported and used during narration.
 LIFESTYLE_POOL = [
     "재택과 출근을 오가며 냉난방 변화가 잦음",
     "마스크 착용이 잦고 실내 공기가 건조함",
@@ -10,6 +12,18 @@ LIFESTYLE_POOL = [
     "계절 전환기라 피부가 예민해지기 쉬움",
     "미세먼지/바람 등 외부 자극 노출이 잦음",
 ]
+
+def sample_lifestyle_phrase(index: int = None) -> str:
+    """
+    Return a lifestyle phrase deterministically (by index) or fallback to first.
+    Used by StrategyNarrator to ground lifestyle context.
+    """
+    if not LIFESTYLE_POOL:
+        return ""
+    if index is None:
+        return LIFESTYLE_POOL[0]
+    return LIFESTYLE_POOL[index % len(LIFESTYLE_POOL)]
+
 PAD_POOL = [
     "최근 관리 주기가 길어졌던 흐름을 고려해, 부담 없이 다시 이어가기 좋은 구성을 중심으로 정리했습니다.",
     "피부 컨디션이 일정하지 않은 날에도 무리 없이 이어갈 수 있도록 사용 흐름을 단순화했습니다.",
@@ -20,3 +34,14 @@ PAD_POOL = [
     "번들 선호가 있다면 동일 라인의 조합으로 루틴을 정돈하는 흐름도 함께 고려할 수 있습니다.",
     "윤리/클린 선호가 있다면 그 기준을 해치지 않는 범위에서 성분 포인트를 간접적으로 연결했습니다.",
 ]
+
+def sample_pad_phrase(exclude: str = "") -> str:
+    """
+    Return a pad phrase that does not overlap with existing body text.
+    Used only for slot4 soft closing.
+    """
+    for p in PAD_POOL:
+        if exclude and exclude in p:
+            continue
+        return p
+    return ""

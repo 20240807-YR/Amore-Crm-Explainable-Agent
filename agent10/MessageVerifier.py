@@ -1,3 +1,4 @@
+print("[MessageVerifier] module loaded")
 def _split_keywords(text: str):
     if not isinstance(text, str):
         return []
@@ -41,4 +42,5 @@ def verify_brand_rules(message: str, rule_row: dict):
     e = check_viewpoint(message, rule_row.get("viewpoint", ""))
     if e: errors.append(e)
 
+    print("[MessageVerifier] verify_brand_rules called")
     return errors

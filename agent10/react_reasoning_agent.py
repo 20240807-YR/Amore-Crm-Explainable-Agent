@@ -54,14 +54,16 @@ class ReActReasoningAgent:
             if v:
                 expandable_context[k] = v
 
+        # External market context is used only in reasoning (RAG evidence), not in generation.
+        market_context = row.get("market_context") or {}
+
         # -------------------------------------------------
         # 3. lifestyle / persona 맥락 확장 (문장 생성 금지)
         # -------------------------------------------------
         lifestyle_expanded = ""
         if expandable_context:
             try:
-                lifestyle_expanded = self.llm.generate(
-                    f"""
+                prompt = f"""
                     다음 페르소나 정보를 바탕으로,
                     문장에서 활용할 수 있는 '상황·맥락 확장 힌트'만 정리하라.
 
@@ -75,14 +77,18 @@ class ReActReasoningAgent:
 
                     [입력 페르소나 맥락]
                     {expandable_context}
+                """
+                if market_context:
+                    prompt += f"""
 
-                    [출력 예시]
-                    - 아침 출근 전 짧은 준비 시간
-                    - 실내 냉난방이 반복되는 환경
-                    - 업무 중 잦은 마스크 착용
-                    - 간단하고 빠른 사용을 선호하는 루틴
+                    [외부 컨텍스트 (참고용)]
+                    {market_context}
+
+                    [주의]
+                    - 위 외부 컨텍스트는 사고 참고용이다.
+                    - 문장 생성, 표현 선택, 광고 카피에는 직접 반영하지 말 것.
                     """
-                ).strip()
+                lifestyle_expanded = self.llm.generate(prompt).strip()
             except Exception:
                 lifestyle_expanded = ""
 

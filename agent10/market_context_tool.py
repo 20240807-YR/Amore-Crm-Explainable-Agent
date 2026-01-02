@@ -3,6 +3,7 @@
 # ✅ 이 파일은 "절대" from market_context_tool import MarketContextTool 같은 라인을 가지면 안 됨.
 
 import os
+print("[MarketContextTool] module loaded")
 
 
 class MarketContextTool:
@@ -18,6 +19,8 @@ class MarketContextTool:
         지금은 use_market_context=False가 기본이니까,
         enabled=False면 무조건 {} 리턴해서 안전하게 우회.
         """
+        print(f"[MarketContextTool] fetch called | enabled={self.enabled}")
+
         if not self.enabled:
             return {}
 

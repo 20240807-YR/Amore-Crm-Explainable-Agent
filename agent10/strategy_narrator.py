@@ -2,6 +2,24 @@
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+# Optional import for tone_templates
+try:
+    from tone_templates import SLOT4_PAD_POOL, PAD_POOL
+except Exception:
+    SLOT4_PAD_POOL = None
+    PAD_POOL = None
+
+# Optional import for tone_profiles / brand_rules (indirect reference only)
+try:
+    from tone_profiles import ToneProfiles
+except Exception:
+    ToneProfiles = None
+
+try:
+    import brand_rules
+except Exception:
+    brand_rules = None
+
 
 class StrategyNarrator:
     """
@@ -20,20 +38,29 @@ class StrategyNarrator:
     ):
         self.llm = llm_client
         self.tone_profile_map = tone_profile_map or {}
-        self.pad_pool = pad_pool or [
-            "오늘 컨디션에 맞춰 가볍게 더하기 좋아요.",
-            "부담 없이 매일 이어가기 좋아요.",
-            "끈적임이 덜해 다음 단계까지 깔끔해요.",
-            "바쁠수록 짧게 정리되는 루틴이 더 편해요.",
-            "가볍게 마무리돼 아침에도 부담이 덜해요.",
-        ]
+        # pad_pool: argument > PAD_POOL from tone_templates > fallback default
+        if pad_pool is not None:
+            self.pad_pool = pad_pool
+        elif PAD_POOL is not None:
+            self.pad_pool = PAD_POOL
+        else:
+            self.pad_pool = [
+                "오늘 컨디션에 맞춰 가볍게 더해보셔도 좋아요.",
+                "프리메라와 함께 아침 루틴을 가볍게 시작해보셔도 좋아요.",
+                "바쁠수록 짧게 정리되는 루틴이 더 편해요.",
+                "끈적임이 덜해 다음 단계까지 깔끔하게 이어져요.",
+                "지금 같은 날엔 한 단계만 더해도 피부가 편해져요.",
+            ]
 
-        # slot4 전용 패딩 풀 (문단 단위 유지, 짧은 문장 나열 금지)
-        self.slot4_pad_pool = [
-            "부담 없이 이어가기 좋아요.",
-            "관리 텀이 조금 비어도 다시 시작이 가벼워요.",
-            "일상 흐름을 끊지 않고 자연스럽게 이어져요.",
-        ]
+        # slot4_pad_pool: SLOT4_PAD_POOL from tone_templates > fallback default
+        if SLOT4_PAD_POOL is not None:
+            self.slot4_pad_pool = SLOT4_PAD_POOL
+        else:
+            self.slot4_pad_pool = [
+                "오늘부터 루틴에 가볍게 더해보셔도 좋아요.",
+                "프리메라와 함께 아침 루틴을 가볍게 시작해보셔도 좋아요.",
+                "지금 컨디션에 맞춰 한 단계만 더해도 충분해요.",
+            ]
 
         # meta/기획/CTA 금지(강제)
         self.meta_ban_phrases = [
@@ -53,7 +80,6 @@ class StrategyNarrator:
             # 문제로 지적된 어색한 종결문(직접 차단)
             "지속 가능성 측면에서도 부담 없이 이어갈 수",
             "이 과정에서 루틴 내 위치, 지속 가능성 측면에서도",
-            "있다",
             # slot4 결론부 질문형 종결 차단용
             "어렵지 않죠?",
             "힘들진 않나요?",
@@ -79,8 +105,78 @@ class StrategyNarrator:
             r"(클릭|구매\s*하기|구매하기|더\s*알아\s*보(려면|기)|자세히\s*보(기|려면))",
             r"(전략적|기획된|설계된)\s*",
             r"지속\s*가능성\s*측면",
-            r"(이다|있다)$",
         ]
+        # indirect / reference-only handles (no decision logic here)
+        self._tone_profiles_ref = ToneProfiles
+        self._brand_rules_ref = brand_rules
+
+    def _normalize_choice_phrase(self, raw: str, kind: str) -> str:
+        """Turn code-like preference strings into natural phrases.
+        - Avoid leaking raw CSV values like '워터리 로션,젤크림' or '무향/저향'.
+        - Return an empty string if nothing usable.
+        """
+        s = self._s(raw)
+        if not s:
+            return ""
+
+        # Split by common delimiters and pick first non-empty token
+        toks = re.split(r"[,/|·\s]+", s)
+        toks = [t.strip() for t in toks if t and t.strip()]
+        token = toks[0] if toks else s.strip()
+
+        # Minimal mapping per kind
+        if kind == "texture":
+            if "워터리" in s or "워터" in s:
+                return "물처럼 가볍게 스며드는 제형"
+            if "젤" in s:
+                return "산뜻한 젤 제형"
+            if "로션" in s:
+                return "가벼운 로션 제형"
+            if "크림" in s:
+                return "부담 없는 크림 제형"
+            return "가볍게 발리는 제형"
+
+        if kind == "finish":
+            if "세미" in s and "매트" in s:
+                return "번들거림 없이 산뜻한 마무리"
+            if "매트" in s:
+                return "보송하게 정리되는 마무리"
+            if "글로" in s or "광" in s:
+                return "은은하게 맑아 보이는 마무리"
+            return "깔끔한 마무리"
+
+        if kind == "scent":
+            if "무향" in s:
+                return "향이 거의 없는 쪽"
+            if "저향" in s or "약" in s:
+                return "향이 강하지 않은 쪽"
+            return "부담 없는 향"
+
+        if kind == "routine":
+            # keep only digits if present
+            m = re.search(r"(\d+)", s)
+            if m:
+                return f"{m.group(1)}단계 안팎의 짧은 루틴"
+            return "짧은 루틴"
+
+        if kind == "time":
+            if "아침" in s and "저녁" in s:
+                return "아침과 저녁"
+            if "아침" in s:
+                return "아침"
+            if "저녁" in s:
+                return "저녁"
+            return "하루"
+
+        if kind == "season":
+            # keep as gentle hint, but avoid raw arrows/symbols
+            return "계절 따라 컨디션이 흔들릴 때"
+
+        return token
+
+    def _safe_hint(self, value: Any, kind: str) -> str:
+        """Public helper to produce safe natural hint strings for prompts/output."""
+        return self._normalize_choice_phrase(self._s(value), kind)
     def _strip_emojis(self, text: str) -> str:
         # Broad emoji unicode blocks
         return re.sub(r"[\U0001F300-\U0001FAFF]", "", self._s(text)).strip()
@@ -102,6 +198,40 @@ class StrategyNarrator:
             t = t.replace(a, b)
         return t
 
+    def _hard_clean_keep_newlines(self, text: str) -> str:
+        """Like _hard_clean, but preserves newline structure."""
+        raw = self._s(text)
+        if not raw:
+            return ""
+        lines = raw.split("\n")
+        cleaned: List[str] = []
+        for ln in lines:
+            t = self._s(ln)
+            if not t:
+                cleaned.append("")
+                continue
+            t = self._strip_markdown_link(t)
+            t = re.sub(r"https?://[^\s]+", "", t, flags=re.IGNORECASE)
+            t = re.sub(r"\s+", " ", t).strip()
+            cleaned.append(t)
+        return "\n".join(cleaned).strip()
+
+    def _fix_missing_inner_punct(self, text: str) -> str:
+        """Insert missing sentence punctuation inside a slot when two sentences are glued.
+        Minimal, conservative heuristic for Korean ad copy.
+        """
+        t = self._s(text)
+        if not t:
+            return ""
+        # Add a period between common sentence endings and a following sentence starter
+        starters = r"(이\s*크림은|이\s*제품은|이\s*라인은|또한|그리고|게다가|다만|특히|그래서|이럴\s*때|이\s*때|덕분에|바로)"
+        endings = r"(입니다|돼요|해요|줘요|돼요|되어요|됩니다|했어요|했죠|했어요|할\s*수\s*있어요|할\s*수\s*있습니다|선사해요|도와줘요|잡아줘요|유지해요|완성해요|추천해요|필요해요)"
+        # If there's no punctuation between ending and starter, insert a period.
+        t = re.sub(rf"({endings})\s+{starters}", r"\1. \2", t)
+        # Also handle '...습니다 이...' style
+        t = re.sub(r"(습니다|입니다|돼요|해요|줘요)\s+(이|그|저)\b", r"\1. \2", t)
+        return t
+
     def _enforce_slot_punct(self, slot_text: str, slot_id: int) -> str:
         """
         slot별 문장부호/이모지 규칙을 사후 통제한다.
@@ -111,7 +241,10 @@ class StrategyNarrator:
                 (문제 제기형 질문은 금지)
         """
         t = self._hard_clean(slot_text)
+        t = self._fix_missing_inner_punct(t)
         t = self._replace_softeners(t)
+        # prevent glued sentences like "...?이럴 때" by ensuring a space after ?/!
+        t = re.sub(r"([?!])(?=[가-힣A-Za-z])", r"\1 ", t)
 
         if slot_id in (1, 2, 3):
             t = self._strip_emojis(t)
@@ -169,6 +302,15 @@ class StrategyNarrator:
             tt = re.sub(r"(!){2,}", "!", tt)
             t = tt
 
+        tt2 = self._s(t).strip()
+        if tt2 and tt2[-1] not in [".", "!", "?"]:
+            # avoid adding '.' after an already valid closing quote/bracket
+            if tt2[-1] not in ["\"", "'", ")", "]", "}" ]:
+                tt2 += "."
+            else:
+                # if ends with quote/bracket, add '.' before it
+                tt2 = tt2[:-1] + "." + tt2[-1]
+        t = tt2
         return t.strip()
     def _build_slot23_expansion_sentence(self, row: Dict[str, Any], plan: Dict[str, Any], slot_id: int) -> str:
         """Deterministic, non-LLM expansion sentence for slot2/slot3.
@@ -179,57 +321,41 @@ class StrategyNarrator:
         """
         pf = plan.get("persona_fields") or {}
 
-        texture = self._s(pf.get("texture_preference") or row.get("texture_preference"))
-        finish = self._s(pf.get("finish_preference") or row.get("finish_preference"))
-        scent = self._s(pf.get("scent_preference") or row.get("scent_preference"))
-        routine_steps = self._s(pf.get("routine_step_count") or row.get("routine_step_count"))
-        time_of_use = self._s(pf.get("time_of_use") or row.get("time_of_use"))
-        seasonality = self._s(pf.get("seasonality") or row.get("seasonality"))
-        shopping_channel = self._s(pf.get("shopping_channel") or row.get("shopping_channel"))
-        repurchase = self._s(pf.get("repurchase_tendency") or row.get("repurchase_tendency"))
-        allergy = self._s(pf.get("allergy_sensitivity") or row.get("allergy_sensitivity"))
-        avoid = self._s(pf.get("ingredient_avoid_list") or row.get("ingredient_avoid_list"))
+        # Use SAFE naturalized hints (avoid raw CSV values)
+        texture_hint = self._safe_hint(pf.get("texture_preference") or row.get("texture_preference"), "texture")
+        finish_hint = self._safe_hint(pf.get("finish_preference") or row.get("finish_preference"), "finish")
+        scent_hint = self._safe_hint(pf.get("scent_preference") or row.get("scent_preference"), "scent")
+        routine_hint = self._safe_hint(pf.get("routine_step_count") or row.get("routine_step_count"), "routine")
+        time_hint = self._safe_hint(pf.get("time_of_use") or row.get("time_of_use"), "time")
+        season_hint = self._safe_hint(pf.get("seasonality") or row.get("seasonality"), "season")
 
-        # Build a single sentence using only available facts.
+        # Build ONE sentence, ad-style, without leaking raw data strings.
         parts: List[str] = []
 
-        if texture:
-            parts.append(f"{texture} 결을 좋아한다면")
-        if finish:
-            parts.append(f"마무리는 {finish} 쪽이 편하고")
-        if scent:
-            parts.append(f"향은 {scent} 쪽이 더 안정적이에요")
+        if texture_hint:
+            parts.append(f"{texture_hint}을 좋아한다면")
+        if finish_hint:
+            parts.append(f"{finish_hint}으로 정리되는 쪽이 더 편하고")
+        if scent_hint:
+            parts.append(f"{scent_hint}라서 더 안정적이에요")
 
-        # Allergy/avoid: only mention if present (no new ingredient claims)
-        if allergy or avoid:
-            tmp = []
-            if allergy:
-                tmp.append(allergy)
-            if avoid:
-                tmp.append(avoid)
-            parts.append(f"민감 포인트는 {', '.join(tmp)}처럼 가볍게 챙기면 좋고")
+        # Add routine/time gently
+        if time_hint or routine_hint:
+            th = time_hint or "하루"
+            rh = routine_hint or "짧은 루틴"
+            parts.append(f"{th} {rh}에도 부담 없이 붙어요")
 
-        if routine_steps or time_of_use:
-            rs = routine_steps if routine_steps else "짧은"
-            to = time_of_use if time_of_use else "하루"
-            parts.append(f"{to} {rs}단계 루틴에도 부담 없이 붙어요")
+        if season_hint:
+            parts.append(f"{season_hint}에도")
 
-        if seasonality:
-            parts.append(f"{seasonality}처럼 컨디션이 흔들리는 때에도")
-
-        if shopping_channel or repurchase:
-            ch = shopping_channel if shopping_channel else "구매"
-            rp = repurchase if repurchase else "재구매"
-            parts.append(f"{ch}에서 {rp} 흐름으로 이어가기에도 좋아요")
-
-        # Fallback if everything is empty
+        # Fallback if hints are empty
         if not parts:
-            return "가벼운 사용감으로 루틴에 자연스럽게 이어지도록 잡아줍니다!"
-
-        sent = " ".join(parts).strip()
-        # Ensure it ends as a confident ad copy sentence.
-        if not sent.endswith(".") and not sent.endswith("!"):
-            sent = sent + "!"
+            sent = "가볍게 스며드는 사용감이라 루틴에 자연스럽게 이어져요!"
+        else:
+            sent = " ".join(parts).strip()
+            # Ensure it ends as a confident ad copy sentence.
+            if not sent.endswith("!"):
+                sent = sent + "!"
 
         # slot2/3 rule enforcement (no '?' / no emoji)
         sent = sent.replace("?", "")
@@ -349,6 +475,9 @@ class StrategyNarrator:
         t = self._strip_markdown_link(t)
         t = re.sub(r"https?://[^\s]+", "", t, flags=re.IGNORECASE)
         t = re.sub(r"\s+", " ", t).strip()
+        # Ensure sentence-ending punctuation
+        if t and not t.endswith(('.', '!', '?')):
+            t += "."
         return t
 
     def _ensure_title_len(self, title: str) -> str:
@@ -378,7 +507,7 @@ class StrategyNarrator:
             lines.append("")
         return "\n".join(lines[:4])
 
-    def _build_slot4_paragraph(self, brand_name: str, avoid_phrases: Optional[List[str]] = None) -> str:
+    def _build_slot4_paragraph(self, brand_name: str, lifestyle_hint: str = "", avoid_phrases: Optional[List[str]] = None) -> str:
         """
         slot4는 항상 하나의 문단으로 생성한다.
         - pad_pool/slot4_pad_pool 문구는 slot4에서만 1회 사용(콘텐츠 주도 금지)
@@ -387,7 +516,11 @@ class StrategyNarrator:
         avoid_phrases = avoid_phrases or []
 
         # 기본 2문장 + (선택) pad 1문장 + (선택) 브랜드 클로징 1문장
-        base_1 = "관리 텀이 조금 비어도 괜찮아요."
+        lh = self._s(lifestyle_hint)
+        if lh:
+            base_1 = f"{lh}처럼 바쁜 날엔, 오늘부터 가볍게 다시 시작해도 좋아요."
+        else:
+            base_1 = "요즘 루틴이 바빴다면, 오늘부터 가볍게 다시 시작해도 좋아요."
 
         # slot4_pad_pool에서 1개만 선택하되, 동일 문구 반복을 피한다.
         pad = ""
@@ -396,11 +529,11 @@ class StrategyNarrator:
             candidates = [s for s in self.slot4_pad_pool if s and s not in base_1]
             pad = candidates[0] if candidates else self.slot4_pad_pool[0]
 
-        base_2 = "오늘 컨디션에 맞춰 가볍게 얹기 좋아요."
+        base_2 = "프리메라와 함께 한 단계만 더해도 피부가 한결 편해져요."
 
         closing = ""
         if self._s(brand_name):
-            closing = f"{brand_name}와 함께라면 일상 흐름을 끊지 않고 자연스럽게 이어져요."
+            closing = f"{brand_name}와 함께 오늘 루틴을 가볍게 이어가 보시겠어요?"
 
         # pad는 1회만 포함
         parts = [base_1]
@@ -417,8 +550,10 @@ class StrategyNarrator:
 
         return self._hard_clean(paragraph)
 
-    def _fit_len_300_350(self, lines: List[str]) -> Tuple[List[str], str]:
+    def _fit_len_300_350(self, lines: List[str], row: Optional[Dict[str, Any]] = None, plan: Optional[Dict[str, Any]] = None) -> Tuple[List[str], str]:
         lines = [self._hard_clean(x) for x in lines]
+        row = row or {}
+        plan = plan or {}
         body = self._join_4lines(lines)
 
         # 길이 보정은 slot4에서만 수행한다.
@@ -427,7 +562,10 @@ class StrategyNarrator:
         if len(body) < 300:
             # slot4가 비어 있으면 기본 문단으로 채움
             if not self._s(lines[3]):
-                lines[3] = self._build_slot4_paragraph("")
+                lh = self._s((plan.get("persona_fields") or {}).get("routine_phrase"))
+                if not lh:
+                    lh = self._lifestyle_phrase(self._as_text(row.get("lifestyle", "")))
+                lines[3] = self._build_slot4_paragraph("", lifestyle_hint=lh)
             else:
                 lines[3] = self._hard_clean(lines[3])
 
@@ -454,20 +592,14 @@ class StrategyNarrator:
             # (2) 그래도 300 미만이면 slot4에 문장을 더 쌓지 않고,
             #     slot2/slot3에 '사실 기반' 확장 문장 1개씩만 추가한다.
             if len(body) < 300:
-                exp2 = self._build_slot23_expansion_sentence({}, {}, 2)
-                exp3 = self._build_slot23_expansion_sentence({}, {}, 3)
-
-                # row/plan 정보가 있는 경우 generate()에서 다시 주입할 수 있도록,
-                # 여기서는 lines에 이미 들어있는 문장을 우선 확장한다.
-                # (fallback 문장만 쓰지 않도록, generate()에서 row/plan을 전달해 재호출하는 구조가 가장 좋지만
-                #  이 함수 시그니처를 유지하기 위해 아래는 최소 안전 확장만 수행)
+                exp2 = self._build_slot23_expansion_sentence(row, plan, 2)
                 if exp2 and exp2 not in lines[1]:
                     lines[1] = self._hard_clean((lines[1] + " " + exp2).strip())
                     lines[1] = self._enforce_slot_punct(lines[1], 2)
                 body = self._join_4lines(lines)
 
             if len(body) < 300:
-                exp3 = self._build_slot23_expansion_sentence({}, {}, 3)
+                exp3 = self._build_slot23_expansion_sentence(row, plan, 3)
                 if exp3 and exp3 not in lines[2]:
                     lines[2] = self._hard_clean((lines[2] + " " + exp3).strip())
                     lines[2] = self._enforce_slot_punct(lines[2], 3)
@@ -539,18 +671,81 @@ class StrategyNarrator:
         joined = "\n".join([self._s(x) for x in out_lines])
         return joined if self._s(joined) else text
 
-    def _ensure_len_300_350(self, body: str) -> str:
+    def _ensure_len_300_350(self, body: str, row: Optional[Dict[str, Any]] = None, plan: Optional[Dict[str, Any]] = None) -> str:
         """
         Compatibility wrapper.
         generate() expects _ensure_len_300_350, but legacy logic uses _fit_len_300_350.
         This method adapts the existing implementation without changing behavior.
         """
+        row = row or {}
+        plan = plan or {}
+
         lines = self._split_4lines(body)
-        _, final_body = self._fit_len_300_350(lines)
-        # 빈 바디 방어: 절대 빈 문자열 반환 금지
+        _, final_body = self._fit_len_300_350(lines, row=row, plan=plan)
+
+        # Dedupe again AFTER padding/expansion (prevents pad self-clone)
+        final_body = self._dedupe_body_ngrams(final_body)
+
+        # If dedupe shortened below min, insert exactly one sentence via LLM (final safety)
+        if len(final_body) < 300:
+            final_body = self._llm_insert_one_sentence(final_body, row, plan)
+            # Keep 4-slot structure, then dedupe once more
+            final_lines = self._split_4lines(final_body)
+            final_lines = [self._enforce_slot_punct(final_lines[0], 1),
+                          self._enforce_slot_punct(final_lines[1], 2),
+                          self._enforce_slot_punct(final_lines[2], 3),
+                          self._enforce_slot_punct(final_lines[3], 4)]
+            final_body = self._join_4lines(final_lines)
+            final_body = self._dedupe_body_ngrams(final_body)
+
+        # Hard guard: never return empty
         if not self._s(final_body):
-            _, final_body = self._fit_len_300_350(["", "", "", ""])
+            _, final_body = self._fit_len_300_350(["", "", "", ""], row=row, plan=plan)
+
+        # Cap at 350 while preserving newline structure
+        if len(final_body) > 350:
+            final_body = final_body[:350].rstrip()
+
         return final_body
+
+    def _llm_insert_one_sentence(self, body: str, row: Dict[str, Any], plan: Dict[str, Any]) -> str:
+        """
+        Final safety valve.
+        - Triggered only if BODY < 300 after all deterministic padding.
+        - Asks LLM to insert exactly ONE sentence.
+        - Sentence must be ad-style, connective, no new facts.
+        - Insertion position is 자유 (LLM decides).
+        """
+        prompt = f"""
+아래 광고 문단은 글자 수가 부족합니다.
+의미를 바꾸지 말고, **접속사로 시작하는 광고 문장 1문장만** 추가해 주세요.
+
+규칙:
+- 반드시 한 문장만 추가
+- 새로운 정보, 수치, 주장 추가 금지
+- 기존 문장 삭제/수정 금지
+- 광고 톤 유지
+- 질문형 ❌
+- 위치는 자유롭게 삽입
+
+[기존 문단]
+{body}
+"""
+        messages = [
+            {"role": "system", "content": "너는 마케팅 카피 편집자다."},
+            {"role": "user", "content": prompt},
+        ]
+        out = self.llm.generate(messages=messages)
+        text = out["text"] if isinstance(out, dict) else out
+        # Preserve slot/newline structure
+        text = self._hard_clean_keep_newlines(text)
+        # Ensure 4 slots
+        lines = self._split_4lines(text)
+        lines = [self._enforce_slot_punct(lines[0], 1),
+                 self._enforce_slot_punct(lines[1], 2),
+                 self._enforce_slot_punct(lines[2], 3),
+                 self._enforce_slot_punct(lines[3], 4)]
+        return self._join_4lines(lines)
 
     # -------------------------
     # prompt builders
@@ -589,6 +784,13 @@ class StrategyNarrator:
 - 결론부 질문(예: "힘들진 않나요?", "어렵지 않죠?")
 - 과도한 일상 회화 완곡(예: "~인 것 같아요", "손이 자주 가는 편이에요")
 - 설명체/하다체/~이다/~합니다
+
+절대 규칙(위반 시 오답 처리):
+- 입력 데이터 값을 그대로 복사하지 마라. (예: "워터리 로션,젤크림", "자사몰/앱", "높음")
+- 콤마(,), 슬래시(/), 파이프(|)로 나열된 원문 값을 문장에 그대로 노출하지 마라.
+- "민감 포인트/선호/유형/채널/재구매" 같은 필드명 표현을 문장에 쓰지 마라.
+- 문장은 반드시 완전한 문장으로 끝내라(명사형/메모형 종결 금지).
+- 문장 부호(. ! ?)로 문장을 정확히 끊어라.
 """
 
     def _build_user_prompt(
@@ -655,7 +857,13 @@ class StrategyNarrator:
 - 라이프스타일: {row.get('lifestyle', '')}
 - 피부 고민: {row.get('skin_concern', '')}
 - 추천 제품: {product_name}
+- 제형/마무리/향 취향: {self._safe_hint((plan.get('persona_fields') or {}).get('texture_preference') or row.get('texture_preference'), 'texture')}, {self._safe_hint((plan.get('persona_fields') or {}).get('finish_preference') or row.get('finish_preference'), 'finish')}, {self._safe_hint((plan.get('persona_fields') or {}).get('scent_preference') or row.get('scent_preference'), 'scent')}
 """
+        # Insert extra instruction lines under the "- 제품명은 2~3문단 어딘가에 자연스럽게 1회 이상 포함" bullet
+        prompt = prompt.replace(
+            "- 제품명은 2~3문단 어딘가에 자연스럽게 1회 이상 포함",
+            "- 제품명은 2~3문단 어딘가에 자연스럽게 1회 이상 포함\n- 아래 고객 정보의 '값'을 그대로 복사하지 말고, 자연스러운 문장으로 풀어 써라(콤마/슬래시 그대로 금지)\n- \"높음/중/낮음\" 같은 등급 표현을 문장에 그대로 쓰지 마라"
+        )
         return prompt
 
 
@@ -729,6 +937,10 @@ class StrategyNarrator:
         if not lifestyle_phrase:
             lifestyle_phrase = "실내 환경이 건조한 날엔"
 
+        # reference-only: keep handles visible for explainability
+        _tone_profiles_available = self._tone_profiles_ref is not None
+        _brand_rules_available = self._brand_rules_ref is not None
+
         # Prepare free paragraph generation prompt
         messages = [
             {"role": "system", "content": self._build_system_prompt(brand_name)},
@@ -736,7 +948,7 @@ class StrategyNarrator:
         ]
         raw_text = self.llm.generate(messages=messages)
         paragraph_text = raw_text["text"] if isinstance(raw_text, dict) else raw_text
-        paragraph_text = self._hard_clean(paragraph_text)
+        paragraph_text = self._hard_clean_keep_newlines(paragraph_text)
 
         # 문단 분리 (절대 쪼개거나 재작성 금지)
         paragraphs = [p.strip() for p in paragraph_text.split("\n\n") if p.strip()]
@@ -766,7 +978,8 @@ class StrategyNarrator:
         lines = [slot1, slot2, slot3, slot4]
         body = "\n".join(lines).strip()
         body = self._dedupe_body_ngrams(body)
-        body = self._ensure_len_300_350(body)
+        body = self._ensure_len_300_350(body, row=row, plan=plan)
+        body = self._dedupe_body_ngrams(body)
 
         title_prompt = f"""
 브랜드: {brand_name}
