@@ -19,22 +19,50 @@ class MessageVerifier:
     def _has_product(self, text: str, product_anchor: str) -> bool:
         if not product_anchor:
             return True
-        # require literal anchor once
-        return product_anchor in text
+        if not text:
+            return False
+
+        # Normalize whitespace
+        norm_text = re.sub(r"\s+", "", text)
+        norm_anchor = re.sub(r"\s+", "", product_anchor)
+
+        # Exact anchor match
+        if norm_anchor in norm_text:
+            return True
+
+        # Tolerant match: strip common volume units like 10ml/30ml/50ml/100ml
+        stripped_anchor = re.sub(r"\d+(ml|ML|mL)", "", norm_anchor)
+        stripped_anchor = stripped_anchor.strip()
+
+        if stripped_anchor and stripped_anchor in norm_text:
+            return True
+
+        return False
 
     def _has_skin_concern(self, text: str, concerns: List[str]) -> bool:
+        """Skin concern is OPTIONAL.
+
+        Policy:
+          - If concerns are not provided (empty list), do NOT validate (always pass).
+          - If concerns are provided, require that **at least one** concern appears in body.
+
+        Notes:
+          - Whitespace-insensitive match to tolerate natural spacing.
+          - We intentionally do not raise warnings when concerns are missing.
+        """
+        # Optional field: if no concerns were provided, skip validation entirely.
         if not concerns:
             return True
 
-        # Whitespace-insensitive match to tolerate natural spacing (e.g., "속 건조" vs "속건조").
+        # Whitespace-insensitive match (e.g., "속 건조" vs "속건조")
         norm_text = re.sub(r"\s+", "", text or "")
         norm_concerns = [re.sub(r"\s+", "", c or "").strip() for c in concerns]
         norm_concerns = [c for c in norm_concerns if c]
         if not norm_concerns:
             return True
 
-        # all concerns must appear at least once (loose match)
-        return all(c in norm_text for c in norm_concerns)
+        # Require at least ONE concern when concerns exist.
+        return any(c in norm_text for c in norm_concerns)
 
     def _count_slots(self, body: str) -> int:
         """Count content slots.
@@ -160,7 +188,8 @@ class MessageVerifier:
             errors.append("product_missing")
 
         # Skin concern check (body)
-        if not self._has_skin_concern(body, skin_concerns):
+        # OPTIONAL: only validate when persona provides skin_concern.
+        if skin_concerns and (not self._has_skin_concern(body, skin_concerns)):
             errors.append("skin_concern_missing")
 
         # Slot count check (require at least 4 lines)

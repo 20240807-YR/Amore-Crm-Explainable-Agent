@@ -21,17 +21,17 @@ class StrategyNarrator:
         self.llm = llm_client
         self.tone_profile_map = tone_profile_map or {}
         self.pad_pool = pad_pool or [
-            "오늘 컨디션에 맞춰 가볍게 얹기 좋아요.",
-            "부담 없이 매일 이어가기 편해요.",
-            "끈적임이 덜해 손이 자주 가요.",
-            "바쁠수록 짧게 정리되는 루틴이 편하죠.",
-            "가볍게 마무리돼 다음 단계가 수월해요.",
+            "오늘 컨디션에 맞춰 가볍게 더하기 좋아요.",
+            "부담 없이 매일 이어가기 좋아요.",
+            "끈적임이 덜해 다음 단계까지 깔끔해요.",
+            "바쁠수록 짧게 정리되는 루틴이 더 편해요.",
+            "가볍게 마무리돼 아침에도 부담이 덜해요.",
         ]
 
         # slot4 전용 패딩 풀 (문단 단위 유지, 짧은 문장 나열 금지)
         self.slot4_pad_pool = [
-            "부담 없이 이어가기 좋고, 손이 자주 가는 편이에요.",
-            "관리 텀이 조금 비어도 다시 시작하기 어렵지 않아요.",
+            "부담 없이 이어가기 좋아요.",
+            "관리 텀이 조금 비어도 다시 시작이 가벼워요.",
             "일상 흐름을 끊지 않고 자연스럽게 이어져요.",
         ]
 
@@ -54,6 +54,25 @@ class StrategyNarrator:
             "지속 가능성 측면에서도 부담 없이 이어갈 수",
             "이 과정에서 루틴 내 위치, 지속 가능성 측면에서도",
             "있다",
+            # slot4 결론부 질문형 종결 차단용
+            "어렵지 않죠?",
+            "힘들진 않나요?",
+            "괜찮지 않나요?",
+        ]
+        # slot4(결론부) 질문은 "결정 유도형"만 조건부 허용
+        # - 허용: 행동 유도/제안형 질문
+        # - 금지: 문제 제기형(힘들진 않나요? / 어렵지 않나요? 등)
+        self.slot4_allow_question_patterns = [
+            r"해보고\s*싶다면\?*$",
+            r"해보는\s*건\s*어떨까요\?*$",
+            r"해보고\s*싶지\s*않나요\?*$",
+            r"시작해보셔도\s*좋아요\.?$",
+            r"확인해보세요\.?$",
+        ]
+        self.slot4_ban_question_patterns = [
+            r"힘들\s*진\s*않나요\?*$",
+            r"어렵\s*지\s*않나요\?*$",
+            r"괜찮\s*지\s*않나요\?*$",
         ]
         self.meta_ban_regex = [
             r"브랜드\s*톤(을|이)?\s*(유지|살리|살려|반영)",
@@ -62,6 +81,160 @@ class StrategyNarrator:
             r"지속\s*가능성\s*측면",
             r"(이다|있다)$",
         ]
+    def _strip_emojis(self, text: str) -> str:
+        # Broad emoji unicode blocks
+        return re.sub(r"[\U0001F300-\U0001FAFF]", "", self._s(text)).strip()
+
+    def _replace_softeners(self, text: str) -> str:
+        """
+        광고 카피 톤에서 판단을 흐리는 완곡 표현을 최소 치환한다.
+        (의미 재작성/확장 금지, 단순 치환만)
+        """
+        t = self._s(text)
+        if not t:
+            return t
+        replacements = {
+            "편이에요": "루틴이에요",
+            "것 같아요": "느껴져요",
+            "같아요": "느껴져요",
+        }
+        for a, b in replacements.items():
+            t = t.replace(a, b)
+        return t
+
+    def _enforce_slot_punct(self, slot_text: str, slot_id: int) -> str:
+        """
+        slot별 문장부호/이모지 규칙을 사후 통제한다.
+        - slot1: '?' 최대 1회 허용, '!' 제거
+        - slot2/3: '?' 제거, '!' 0~2회 허용(과다 시 2회로 축소), 이모지 제거
+        - slot4: 기본은 '?' 금지. 단, "결정 유도형(제안형)" 질문만 조건부 허용
+                (문제 제기형 질문은 금지)
+        """
+        t = self._hard_clean(slot_text)
+        t = self._replace_softeners(t)
+
+        if slot_id in (1, 2, 3):
+            t = self._strip_emojis(t)
+
+        if slot_id == 1:
+            t = t.replace("!", "")
+            # keep at most one '?'
+            if t.count("?") > 1:
+                first = t.find("?")
+                t = t[: first + 1] + t[first + 1 :].replace("?", "")
+        elif slot_id in (2, 3):
+            t = t.replace("?", "")
+            # allow up to 2 '!'
+            if t.count("!") > 2:
+                # remove extras from the end
+                extras = t.count("!") - 2
+                while extras > 0:
+                    idx = t.rfind("!")
+                    if idx == -1:
+                        break
+                    t = t[:idx] + t[idx + 1 :]
+                    extras -= 1
+        else:  # slot4
+            # slot4는 기본적으로 결론부 질문을 금지하되,
+            # "결정 유도형(제안형)" 질문 패턴만 조건부 허용한다.
+            tt = t
+
+            # 1) 문제 제기형 질문은 무조건 제거
+            for rx in getattr(self, "slot4_ban_question_patterns", []):
+                if re.search(rx, tt):
+                    tt = tt.replace("?", "").strip()
+                    break
+
+            # 2) 허용 패턴이면 '?'를 유지 (없으면 추가하지 않음)
+            if "?" in tt:
+                allowed = False
+                for rx in getattr(self, "slot4_allow_question_patterns", []):
+                    if re.search(rx, tt):
+                        allowed = True
+                        break
+                if not allowed:
+                    tt = tt.replace("?", "").strip()
+
+            # 3) 느낌표는 최대 1회
+            if tt.count("!") > 1:
+                extras = tt.count("!") - 1
+                while extras > 0:
+                    idx = tt.rfind("!")
+                    if idx == -1:
+                        break
+                    tt = tt[:idx] + tt[idx + 1 :]
+                    extras -= 1
+
+            # emoji only in slot4, but prevent obvious spam like "!!!" or repeated sparkles
+            tt = re.sub(r"(!){2,}", "!", tt)
+            t = tt
+
+        return t.strip()
+    def _build_slot23_expansion_sentence(self, row: Dict[str, Any], plan: Dict[str, Any], slot_id: int) -> str:
+        """Deterministic, non-LLM expansion sentence for slot2/slot3.
+
+        - 목적: BODY가 300자 미만일 때 slot4 패딩 남발 없이 길이를 확보.
+        - 원칙: 의미 왜곡/추정 금지. row/plan/persona_fields에 실제 존재하는 값만 사용.
+        - slot2/slot3에만 사용(이모지 금지, '?' 금지).
+        """
+        pf = plan.get("persona_fields") or {}
+
+        texture = self._s(pf.get("texture_preference") or row.get("texture_preference"))
+        finish = self._s(pf.get("finish_preference") or row.get("finish_preference"))
+        scent = self._s(pf.get("scent_preference") or row.get("scent_preference"))
+        routine_steps = self._s(pf.get("routine_step_count") or row.get("routine_step_count"))
+        time_of_use = self._s(pf.get("time_of_use") or row.get("time_of_use"))
+        seasonality = self._s(pf.get("seasonality") or row.get("seasonality"))
+        shopping_channel = self._s(pf.get("shopping_channel") or row.get("shopping_channel"))
+        repurchase = self._s(pf.get("repurchase_tendency") or row.get("repurchase_tendency"))
+        allergy = self._s(pf.get("allergy_sensitivity") or row.get("allergy_sensitivity"))
+        avoid = self._s(pf.get("ingredient_avoid_list") or row.get("ingredient_avoid_list"))
+
+        # Build a single sentence using only available facts.
+        parts: List[str] = []
+
+        if texture:
+            parts.append(f"{texture} 결을 좋아한다면")
+        if finish:
+            parts.append(f"마무리는 {finish} 쪽이 편하고")
+        if scent:
+            parts.append(f"향은 {scent} 쪽이 더 안정적이에요")
+
+        # Allergy/avoid: only mention if present (no new ingredient claims)
+        if allergy or avoid:
+            tmp = []
+            if allergy:
+                tmp.append(allergy)
+            if avoid:
+                tmp.append(avoid)
+            parts.append(f"민감 포인트는 {', '.join(tmp)}처럼 가볍게 챙기면 좋고")
+
+        if routine_steps or time_of_use:
+            rs = routine_steps if routine_steps else "짧은"
+            to = time_of_use if time_of_use else "하루"
+            parts.append(f"{to} {rs}단계 루틴에도 부담 없이 붙어요")
+
+        if seasonality:
+            parts.append(f"{seasonality}처럼 컨디션이 흔들리는 때에도")
+
+        if shopping_channel or repurchase:
+            ch = shopping_channel if shopping_channel else "구매"
+            rp = repurchase if repurchase else "재구매"
+            parts.append(f"{ch}에서 {rp} 흐름으로 이어가기에도 좋아요")
+
+        # Fallback if everything is empty
+        if not parts:
+            return "가벼운 사용감으로 루틴에 자연스럽게 이어지도록 잡아줍니다!"
+
+        sent = " ".join(parts).strip()
+        # Ensure it ends as a confident ad copy sentence.
+        if not sent.endswith(".") and not sent.endswith("!"):
+            sent = sent + "!"
+
+        # slot2/3 rule enforcement (no '?' / no emoji)
+        sent = sent.replace("?", "")
+        sent = self._strip_emojis(sent)
+        return self._hard_clean(sent)
 
     # -------------------------
     # utils
@@ -278,13 +451,34 @@ class StrategyNarrator:
 
             body = self._join_4lines(lines)
 
-            # (2) 그래도 300 미만이면 pad 풀 없이 slot4에만 짧은 연결 문장 1회 추가
-            #     (pad가 콘텐츠를 주도하지 않게 최소한으로만)
+            # (2) 그래도 300 미만이면 slot4에 문장을 더 쌓지 않고,
+            #     slot2/slot3에 '사실 기반' 확장 문장 1개씩만 추가한다.
             if len(body) < 300:
-                extra = "오늘 루틴에 가볍게 더해도 부담 없어요."
-                if extra not in lines[3]:
-                    lines[3] = self._hard_clean(lines[3] + " " + extra)
+                exp2 = self._build_slot23_expansion_sentence({}, {}, 2)
+                exp3 = self._build_slot23_expansion_sentence({}, {}, 3)
+
+                # row/plan 정보가 있는 경우 generate()에서 다시 주입할 수 있도록,
+                # 여기서는 lines에 이미 들어있는 문장을 우선 확장한다.
+                # (fallback 문장만 쓰지 않도록, generate()에서 row/plan을 전달해 재호출하는 구조가 가장 좋지만
+                #  이 함수 시그니처를 유지하기 위해 아래는 최소 안전 확장만 수행)
+                if exp2 and exp2 not in lines[1]:
+                    lines[1] = self._hard_clean((lines[1] + " " + exp2).strip())
+                    lines[1] = self._enforce_slot_punct(lines[1], 2)
                 body = self._join_4lines(lines)
+
+            if len(body) < 300:
+                exp3 = self._build_slot23_expansion_sentence({}, {}, 3)
+                if exp3 and exp3 not in lines[2]:
+                    lines[2] = self._hard_clean((lines[2] + " " + exp3).strip())
+                    lines[2] = self._enforce_slot_punct(lines[2], 3)
+                body = self._join_4lines(lines)
+
+        # 최종 slot 규칙 재강제(확장/패딩 이후)
+        lines[0] = self._enforce_slot_punct(lines[0], 1)
+        lines[1] = self._enforce_slot_punct(lines[1], 2)
+        lines[2] = self._enforce_slot_punct(lines[2], 3)
+        lines[3] = self._enforce_slot_punct(lines[3], 4)
+        body = self._join_4lines(lines)
 
         # 상한은 자르되, 줄 구조는 유지
         if len(body) > 350:
@@ -370,29 +564,30 @@ class StrategyNarrator:
 너는 내부 마케팅 담당자다.
 
 목표:
-- 설명이 아니라 '제안형 광고 문구'를 작성한다.
-- 독자가 한 번에 읽히는 하나의 흐름을 만든다.
-- 문장 간 단절을 금지한다.
+- 정보 문장이 아니라 '정제된 광고 카피'를 쓴다.
+- "광고처럼 보이는 것"은 문제가 아니라 목표다.
+- BODY는 문장 리스트가 아니라 광고 문단(카피) 흐름이다.
 
-핵심 사고 규칙:
-- 각 슬롯은 독립 문장이 아니다.
-- 다음 슬롯은 반드시 이전 슬롯의 마지막 의미를 받아 이어 말해야 한다.
-- 질문 → 제안 → 사용 장면 → 완곡한 마무리 흐름을 유지한다.
+문단(슬롯) 구성:
+- BODY는 4개 슬롯(4줄) 구조를 가진다.
+- 각 슬롯은 2~3문장까지 허용된다(문장 나열식 1문장만 반복 금지).
+- slot2 + slot3은 하나의 광고 문단처럼 자연스럽게 연결되어도 된다.
 
-말하기 규칙:
-- slot1 끝은 질문형 또는 공감형 종결을 사용한다.
-- slot2는 반드시 연결어(이럴 때, 그래서, 이렇게)를 포함해 slot1을 이어간다.
-- slot3은 사용 방법을 설명하지 말고, slot2 문장 안에서 자연스럽게 이어 붙인다는 사고로 작성한다.
-- slot4는 감탄사·이모지·완곡 표현으로 가볍게 닫는다.
+문장부호/이모지 규칙(강제):
+- slot1: '?' 최대 1회 허용, '!' 금지, 이모지 금지
+- slot2/slot3: '?' 금지, '!' 1~2회 허용, 이모지 금지
+- slot4: '?' 기본 금지. 단, 결론부는 단정적 문장 또는 '결정 유도형(제안형)' 질문으로 마무리 가능(문제 제기형 질문 금지). '!' 0~1회 허용, 이모지는 ✨💧 정도만 1회 허용
 
-허용 표현:
-- "~느껴지죠?", "~이럴 때는", "~어떨까요?"
-- "~부담 없이", "~가볍게 이어가요"
-- "오늘 같은 컨디션에는"
+전개 규칙:
+- slot1은 상황 도입/공감으로 관심을 끌고, 질문은 여기서만 제한적으로 쓴다.
+- slot2는 "그래서/이럴 때/이런 분께" 같은 연결어로 slot1을 이어서 제품 제안을 한다(제품명 자연스럽게 1회 이상 포함).
+- slot3은 사용 장면/루틴을 '설명'하지 말고, slot2의 흐름을 이어 체감/사용감을 붙여준다.
+- slot4는 단정적·확신형 카피로 마무리하고, 질문을 남기지 않는다.
 
 금지:
 - 정보 나열식 설명
-- 문장 간 끊김이 느껴지는 전개
+- 결론부 질문(예: "힘들진 않나요?", "어렵지 않죠?")
+- 과도한 일상 회화 완곡(예: "~인 것 같아요", "손이 자주 가는 편이에요")
 - 설명체/하다체/~이다/~합니다
 """
 
@@ -445,13 +640,16 @@ class StrategyNarrator:
 
         prompt = f"""
 [작성 지시]
-아래 정보를 참고하여 {brand_name}의 마케팅 메시지를 자유롭게 작성하세요.
+아래 정보를 참고하여 {brand_name}의 마케팅 메시지를 작성하세요.
 
-- 길이: 공백 포함 600~1000자
-- 구조 제한 없음
-- 설명/분석/자기소개 금지
-- 고객에게 직접 말 거는 어조 유지
-- 브랜드/제품/피부 고민/상황을 자연스럽게 포함
+- 출력은 반드시 4개 문단(슬롯)로만 구성
+- 문단과 문단 사이는 '빈 줄(\\n\\n)'로 구분
+- 각 문단은 2~3문장까지 허용 (문장 리스트처럼 1문장만 나열 금지)
+- 질문('?')은 1문단(slot1)에서만 최대 1회 허용, 4문단(slot4)은 기본 금지(단, '결정 유도형(제안형)' 질문만 허용)
+- 2~3문단(slot2/slot3)에서는 '!' 1~2회 허용, 이모지 금지
+- 4문단(slot4)만 이모지 1개 허용(✨ 또는 💧), '!'은 1회까지 허용
+- 제품명은 2~3문단 어딘가에 자연스럽게 1회 이상 포함
+- 설명/분석/자기소개 금지, 광고 카피 톤 유지
 
 [고객 정보]
 - 라이프스타일: {row.get('lifestyle', '')}
@@ -546,6 +744,23 @@ class StrategyNarrator:
         slot2 = paragraphs[1] if len(paragraphs) > 1 else ""
         slot3 = paragraphs[2] if len(paragraphs) > 2 else ""
         slot4 = paragraphs[3] if len(paragraphs) > 3 else ""
+
+        # slot별 문장부호/이모지 규칙 강제
+        slot1 = self._enforce_slot_punct(slot1, 1)
+        slot2 = self._enforce_slot_punct(slot2, 2)
+        slot3 = self._enforce_slot_punct(slot3, 3)
+        slot4 = self._enforce_slot_punct(slot4, 4)
+        # slot4는 기본적으로 결론부 질문을 금지하되,
+        # 제안형(결정 유도형) 질문은 조건부 허용한다.
+        slot4 = slot4.rstrip()
+        if slot4.endswith("?"):
+            allowed = False
+            for rx in getattr(self, "slot4_allow_question_patterns", []):
+                if re.search(rx, slot4):
+                    allowed = True
+                    break
+            if not allowed:
+                slot4 = slot4.rstrip("?").rstrip()
 
         # slot4만 pad 허용 (최대 1회)
         lines = [slot1, slot2, slot3, slot4]
