@@ -208,15 +208,36 @@ class StrategyNarrator:
     def _build_slot4_paragraph(self, brand_name: str, avoid_phrases: Optional[List[str]] = None) -> str:
         """
         slot4는 항상 하나의 문단으로 생성한다.
-        (완곡 → 사용감/편의성 → 브랜드 클로징)
+        - pad_pool/slot4_pad_pool 문구는 slot4에서만 1회 사용(콘텐츠 주도 금지)
+        - 같은 완곡 문구를 여러 번 누적하지 않는다.
         """
         avoid_phrases = avoid_phrases or []
 
-        s1 = "관리 텀이 조금 비어도 괜찮아요."
-        s2 = self.slot4_pad_pool[0]
-        s3 = f"그래서 {brand_name}와 함께라면 일상 속에서 부담 없이 이어가기 좋아요."
+        # 기본 2문장 + (선택) pad 1문장 + (선택) 브랜드 클로징 1문장
+        base_1 = "관리 텀이 조금 비어도 괜찮아요."
 
-        paragraph = f"{s1} {s2} {s3}"
+        # slot4_pad_pool에서 1개만 선택하되, 동일 문구 반복을 피한다.
+        pad = ""
+        if self.slot4_pad_pool:
+            # 첫 문장(관리 텀)과 의미가 겹치지 않는 문장 우선
+            candidates = [s for s in self.slot4_pad_pool if s and s not in base_1]
+            pad = candidates[0] if candidates else self.slot4_pad_pool[0]
+
+        base_2 = "오늘 컨디션에 맞춰 가볍게 얹기 좋아요."
+
+        closing = ""
+        if self._s(brand_name):
+            closing = f"{brand_name}와 함께라면 일상 흐름을 끊지 않고 자연스럽게 이어져요."
+
+        # pad는 1회만 포함
+        parts = [base_1]
+        if pad:
+            parts.append(pad)
+        parts.append(base_2)
+        if closing:
+            parts.append(closing)
+
+        paragraph = " ".join([self._s(p) for p in parts if self._s(p)])
 
         for p in avoid_phrases:
             paragraph = paragraph.replace(p, "")
@@ -227,20 +248,102 @@ class StrategyNarrator:
         lines = [self._hard_clean(x) for x in lines]
         body = self._join_4lines(lines)
 
-        safety = 0
-        while len(body) < 300 and safety < 50:
-            # slot4는 이미 완결 문단 → 길이 보정에 재사용 금지
-            idx = safety % 3  # slot1~3만 순환
-            lines[idx] = self._hard_clean(
-                lines[idx] + " " + self.pad_pool[safety % len(self.pad_pool)]
-            )
-            body = self._join_4lines(lines)
-            safety += 1
+        # 길이 보정은 slot4에서만 수행한다.
+        # - pad_pool/slot4_pad_pool 문구는 slot4에서 1회만 사용
+        # - slot1~3에는 어떤 경우에도 pad를 붙이지 않는다.
+        if len(body) < 300:
+            # slot4가 비어 있으면 기본 문단으로 채움
+            if not self._s(lines[3]):
+                lines[3] = self._build_slot4_paragraph("")
+            else:
+                lines[3] = self._hard_clean(lines[3])
 
+            # (1) pad 풀 문구는 1회만 추가 (중복이면 스킵)
+            pad_added = False
+            pad_sources = []
+            if self.slot4_pad_pool:
+                pad_sources.extend(self.slot4_pad_pool)
+            elif self.pad_pool:
+                pad_sources.extend(self.pad_pool)
+
+            for cand in pad_sources:
+                cand = self._s(cand)
+                if not cand:
+                    continue
+                if cand in lines[3]:
+                    continue
+                lines[3] = self._hard_clean(lines[3] + " " + cand)
+                pad_added = True
+                break
+
+            body = self._join_4lines(lines)
+
+            # (2) 그래도 300 미만이면 pad 풀 없이 slot4에만 짧은 연결 문장 1회 추가
+            #     (pad가 콘텐츠를 주도하지 않게 최소한으로만)
+            if len(body) < 300:
+                extra = "오늘 루틴에 가볍게 더해도 부담 없어요."
+                if extra not in lines[3]:
+                    lines[3] = self._hard_clean(lines[3] + " " + extra)
+                body = self._join_4lines(lines)
+
+        # 상한은 자르되, 줄 구조는 유지
         if len(body) > 350:
             body = body[:350].rstrip()
 
         return lines, body
+    def _dedupe_body_ngrams(self, body: str, n: int = 6) -> str:
+        """
+        BODY 전체 기준 n-gram 중복을 제거한다.
+        - 원칙: "삭제만" 수행 (대체 문장 생성 금지)
+        - 줄(슬롯) 구조는 유지
+        - 같은 구문이 반복되면 "뒤쪽" 문장부터 제거
+        """
+        text = self._s(body)
+        if not text:
+            return ""
+
+        # 줄(슬롯) 단위 유지
+        lines = [ln.strip() for ln in text.split("\n")]
+
+        def split_sentences(s: str) -> List[str]:
+            # 과도한 분해를 피하기 위해 마침표/물음표/느낌표/물결/… 기준만 분리
+            parts = re.split(r"(?<=[\.!?…~])\s+", self._s(s))
+            return [p.strip() for p in parts if p and p.strip()]
+
+        seen = set()
+        out_lines: List[str] = []
+
+        for line in lines:
+            sents = split_sentences(line)
+            kept: List[str] = []
+            for sent in sents:
+                toks = sent.split()
+                # 너무 짧으면 n-gram 기반 중복 판단을 하지 않음
+                if len(toks) < n:
+                    kept.append(sent)
+                    continue
+
+                dup = False
+                for i in range(len(toks) - n + 1):
+                    ng = tuple(toks[i : i + n])
+                    if ng in seen:
+                        dup = True
+                        break
+
+                if dup:
+                    # "삭제만": 중복 문장은 버린다.
+                    continue
+
+                # 최초 등장 n-gram 기록
+                for i in range(len(toks) - n + 1):
+                    seen.add(tuple(toks[i : i + n]))
+                kept.append(sent)
+
+            out_lines.append(" ".join(kept).strip())
+
+        # 모든 문장이 삭제되는 극단 케이스 방어
+        joined = "\n".join([self._s(x) for x in out_lines])
+        return joined if self._s(joined) else text
 
     def _ensure_len_300_350(self, body: str) -> str:
         """
@@ -423,236 +526,32 @@ class StrategyNarrator:
         brand_name = self._s(row.get("brand", "아모레퍼시픽"))
         product_name = self._s(row.get("상품명", ""))
         skin_concern = self._s(row.get("skin_concern", ""))
-
-        # NOTE: BODY에는 plan.lifestyle_expanded 덤프가 흘러가면 verifier(4줄/길이) 기준이 깨짐.
-        # BODY/프롬프트에는 row.lifestyle(짧은 원문)만 사용.
         lifestyle_raw = self._as_text(row.get("lifestyle", ""))
         lifestyle_phrase = self._lifestyle_phrase(lifestyle_raw)
         if not lifestyle_phrase:
-            # 환경 토큰이 없거나 제거되어 비면, slot1에서 무리하게 키워드를 끌어오지 않는다.
             lifestyle_phrase = "실내 환경이 건조한 날엔"
 
-        # -------------------------
-        # must_include 의미화 (단어 자체 금지)
-        # -------------------------
-        must_include = plan.get("brand_must_include", []) or []
-        must_include = [self._s(x) for x in must_include if self._s(x)]
-
-        meaning_map = {
-            "사용감": "발림/흡수/가벼움/끈적임 적음/레이어링 쉬움의 의미로만",
-            "루틴 내 위치": "세안 후/토너 다음/아침·저녁/마지막 단계/3~4단계 중 위치의 의미로만",
-            "지속 가능성": "매일 부담 없음/꾸준히/관리 주기/텀이 길어져도 이어가기 쉬움의 의미로만",
-        }
-
-        meaning_rules = []
-        for k in must_include:
-            if k in meaning_map:
-                meaning_rules.append(f"- '{k}' 단어는 절대 쓰지 말고 {meaning_map[k]} 표현하세요.")
-            else:
-                meaning_rules.append(f"- '{k}'는 단어 그대로 쓰지 말고 의미로 자연스럽게 풀어 쓰세요.")
-        meaning_rules_text = "\n".join(meaning_rules) if meaning_rules else "- 없음"
-
-        forbidden_tokens = [
-            "TITLE", "BODY", "제목", "본문",
-            "사용감", "루틴 내 위치", "지속 가능성",
-            "slot1_text", "slot2_text", "slot3_text", "slot4_text",
+        # Prepare free paragraph generation prompt
+        messages = [
+            {"role": "system", "content": self._build_system_prompt(brand_name)},
+            {"role": "user", "content": self._build_user_prompt_free(row, plan, brand_rule)},
         ]
+        raw_text = self.llm.generate(messages=messages)
+        paragraph_text = raw_text["text"] if isinstance(raw_text, dict) else raw_text
+        paragraph_text = self._hard_clean(paragraph_text)
 
-        routine_markers = ["세안", "토너", "아침", "저녁", "단계", "마지막", "3~4"]
+        # 문단 분리 (절대 쪼개거나 재작성 금지)
+        paragraphs = [p.strip() for p in paragraph_text.split("\n\n") if p.strip()]
+        slot1 = paragraphs[0] if len(paragraphs) > 0 else ""
+        slot2 = paragraphs[1] if len(paragraphs) > 1 else ""
+        slot3 = paragraphs[2] if len(paragraphs) > 2 else ""
+        slot4 = paragraphs[3] if len(paragraphs) > 3 else ""
 
-        def _has_forbidden(text: str) -> Optional[str]:
-            t = self._s(text)
-            for tok in forbidden_tokens:
-                if tok and tok in t:
-                    return tok
-            if self._contains_banned(t):
-                return "banned_phrase"
-            return None
-
-        def _fallback_slots() -> List[str]:
-            product_anchor = self._s(plan.get("product_anchor") or product_name)
-            concerns = [c.strip() for c in self._s(skin_concern).split(",") if c.strip()]
-            concerns_str = ",".join(concerns) if concerns else self._s(skin_concern)
-
-            # slot1: 광고 첫 문장. 상황 공감 또는 오늘/요즘 컨디션 언급.
-            l1 = f"요즘처럼 {lifestyle_phrase} 환경에서는 피부 컨디션이 쉽게 달라질 수 있어요."
-            # slot2: 문제 인식 후 제품을 '제안'하는 문장. 설명 금지.
-            l2 = f"출근 전 5분처럼 짧은 시간에 {concerns_str}이 신경 쓰일 때는 {product_anchor}을 한 번 써보는 건 어떨까요?"
-            # slot3: 사용 장면을 떠올리게 하는 루틴/상황 연결 문장.
-            l3 = "세안 후 토너 다음 단계에서 가볍게 발라주면, 일상 루틴에 부담 없이 더할 수 있어요."
-            # slot4: fallback slot4는 _build_slot4_paragraph 사용
-            slots = [self._hard_clean(l1), self._hard_clean(l2), self._hard_clean(l3), ""]
-            slots[3] = self._build_slot4_paragraph(brand_name)
-            return slots
-
-        def _validate_slots(slots: List[str]) -> None:
-            if len(slots) != 4:
-                raise ValueError("slot_count<4")
-
-            joined = " ".join(slots)
-            leaked = _has_forbidden(joined)
-            if leaked:
-                raise ValueError(f"forbidden token leaked: {leaked}")
-
-            if any(len(self._s(s)) < 35 for s in slots):
-                raise ValueError("slot too short")
-
-            if product_name and product_name not in slots[1]:
-                raise ValueError("product missing in slot2")
-            if skin_concern and skin_concern not in slots[1]:
-                raise ValueError("skin_concern missing in slot2")
-
-            if not any(mk in slots[2] for mk in routine_markers):
-                raise ValueError("routine marker missing in slot3")
-
-        last_err = None
-        slots: List[str] = []
-
-        for _ in range(3):
-            try:
-                system_p = (
-                    f"당신은 {brand_name}의 전문 마케팅 카피라이터입니다.\n\n"
-                    "[중요]\n"
-                    "- 출력은 반드시 slot1_text~slot4_text 4줄만 허용합니다.\n"
-                    "- 다른 라벨/설명/번호/불릿/빈 줄 금지\n"
-                    "- 반드시 해요체만 사용\n"
-                    "- '~이다/~한다/~있다/~합니다' 금지\n"
-                    "- 링크/URL/클릭/구매하기/더 알아보기 등 CTA 문구 금지\n"
-                    "- '사용감','루틴 내 위치','지속 가능성' 단어 자체 금지\n"
-                    "\n"
-                    "[문장 연결 강제 규칙]\n"
-                    "- slot2는 slot1의 질문이나 상황을 직접 받아 시작해야 한다.\n"
-                    "- slot3은 새로운 문단처럼 쓰지 말고, slot2의 제안 문장을 이어 확장한다.\n"
-                    "- 각 슬롯은 읽었을 때 하나의 광고 문단처럼 자연스럽게 연결되어야 한다.\n"
-                )
-
-                user_p = f"""
-[입력]
-- 라이프스타일: {lifestyle_raw}
-- 피부 고민: {skin_concern}
-- 추천 제품(상품명 그대로 포함): {product_name}
-
-[필수 규칙]
-- 아래 4줄만 출력하세요
-- 각 줄은 1~2문장, 해요체
-- slot2_text에는 반드시 제품명 + 피부 고민 포함
-- slot3_text에는 사용 순서/시간대/단계 표현 필수
-- slot4_text에는 꾸준함/관리 주기/구매 텀 완곡 포함
-
-[brand_must_include 처리]
-{meaning_rules_text}
-
-[출력 형식]
-slot1_text: ...
-slot2_text: ...
-slot3_text: ...
-slot4_text: ...
-""".strip()
-
-                messages = [{"role": "system", "content": system_p}, {"role": "user", "content": user_p}]
-                slot_out = self.llm.generate(messages=messages)
-                slot_out = self._s(slot_out.get("text", "") if isinstance(slot_out, dict) else slot_out)
-
-                m = re.search(
-                    r"slot1_text\s*:\s*(.*?)\n\s*slot2_text\s*:\s*(.*?)\n\s*slot3_text\s*:\s*(.*?)\n\s*slot4_text\s*:\s*(.*)",
-                    slot_out,
-                    re.DOTALL | re.IGNORECASE,
-                )
-                if not m:
-                    raise ValueError("LLM slot format mismatch")
-
-                raw_slots = [self._s(s) for s in m.groups()]
-                slots = [self._hard_clean(s) for s in raw_slots]
-
-                _validate_slots(slots)
-                last_err = None
-                break
-
-            except Exception as e:
-                last_err = e
-                slots = []
-
-        if not slots:
-            slots = _fallback_slots()
-            _validate_slots(slots)
-
-        # -------------------------
-        # STRICT ENFORCEMENT FOR VERIFIER (literal + 4 lines + 300~350)
-        # - BODY는 반드시 4줄(비어있지 않은 줄 >= 4)
-        # - brand/product_anchor/skin_concern 토큰은 BODY에 literal 포함
-        # - 줄바꿈은 최종 조립 시점 1회만
-        # -------------------------
-        product_anchor = self._s(plan.get("product_anchor") or product_name)
-        concerns = [c.strip() for c in self._s(skin_concern).split(",") if c.strip()]
-        concerns_str = ",".join(concerns) if concerns else self._s(skin_concern)
-
-        def _build_strict_slots() -> List[str]:
-            s1 = (
-                f"{lifestyle_phrase} 피부가 쉽게 건조해지면서 번들거림도 같이 느껴지죠? "
-                "컨디션이 하루에 여러 번 흔들릴 수 있어요."
-            )
-            s2 = (
-                f"이럴 때 {concerns_str}까지 신경 쓰이면, {product_anchor}로 "
-                "균형을 잡아주는 건 어떨까요? 가볍게 스며들어 겉은 번들거리지 않게 정돈돼요."
-            )
-            s3 = (
-                "세안 후 토너 다음 단계에서 얇게 펴 바르고, "
-                "아침·저녁 루틴에서 필요한 부위만 한 겹 더 레이어링해도 좋아요."
-            )
-            s4 = (
-                f"최근 관리 텀이 조금 길어졌더라도 괜찮아요. "
-                f"{brand_name}로 부담 없이 다시 시작해도 이어가기 쉬워요. "
-                "오늘 컨디션에 맞춰 가볍게 얹기 좋아요."
-            )
-            return [
-                self._hard_clean(s1),
-                self._hard_clean(s2),
-                self._hard_clean(s3),
-                self._hard_clean(s4),
-            ]
-
-        # 1) LLM 슬롯이 있으면 우선 사용하되, verifier literal 조건을 만족하지 못하면 즉시 strict 슬롯로 교체
-        if not slots:
-            slots = _build_strict_slots()
-        else:
-            joined = "\n".join([self._s(x) for x in slots])
-            need_strict = False
-            # 4줄 구조가 깨졌거나 비어있는 줄이 생기면 strict로 교체
-            lines_tmp = [ln for ln in self._split_4lines(joined) if self._s(ln)]
-            if len(lines_tmp) < 4:
-                need_strict = True
-            if need_strict:
-                slots = _build_strict_slots()
-
-        # 2) 최종 조립은 4줄 1회만
-        body = "\n".join([self._s(x) for x in slots[:4]]).strip()
+        # slot4만 pad 허용 (최대 1회)
+        lines = [slot1, slot2, slot3, slot4]
+        body = "\n".join(lines).strip()
+        body = self._dedupe_body_ngrams(body)
         body = self._ensure_len_300_350(body)
-
-        # 3) 보정 이후에도 literal 누락이면 slot2/slot4에 강제 주입 (최소 수정)
-        lines = self._split_4lines(body)
-        while len(lines) < 4:
-            lines.append("")
-        # slot2: product_anchor + concerns
-        if product_anchor and product_anchor not in lines[1]:
-            lines[1] = (self._s(lines[1]) + f" {product_anchor}").strip()
-        for c in concerns:
-            if c and c not in lines[1] and c not in body:
-                lines[1] = (self._s(lines[1]) + f" {c}").strip()
-        # slot4: brand
-        if brand_name and brand_name not in body:
-            lines[3] = (self._s(lines[3]) + f" {brand_name}").strip()
-
-        body = self._ensure_len_300_350("\n".join([self._hard_clean(x) for x in lines[:4]]).strip())
-
-        # 4) 최종 4줄 보장
-        lines = self._split_4lines(body)
-        if len(lines) != 4:
-            slots = _build_strict_slots()
-            body = self._ensure_len_300_350("\n".join(slots).strip())
-            lines = self._split_4lines(body)
-            if len(lines) != 4:
-                raise ValueError("final body slot count != 4")
-
 
         title_prompt = f"""
 브랜드: {brand_name}
@@ -670,7 +569,6 @@ slot4_text: ...
             {"role": "system", "content": "제목만 한 줄로 작성하세요."},
             {"role": "user", "content": title_prompt},
         ]
-
         title_out = self.llm.generate(messages=title_messages)
         title = self._ensure_title_25_40_with_emojis(
             self._s(title_out.get("text", "") if isinstance(title_out, dict) else title_out),
@@ -679,7 +577,6 @@ slot4_text: ...
             skin_concern,
             lifestyle_phrase,
         )
-
         return f"TITLE: {title}\nBODY: {body}"
     def _has_emoji(self, s: str) -> bool:
         import re

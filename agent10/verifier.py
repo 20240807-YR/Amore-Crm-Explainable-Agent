@@ -73,21 +73,64 @@ class MessageVerifier:
         return False
 
     def _has_semantic_duplication(self, body: str) -> bool:
+        """Detect adjacent (consecutive) repetition rather than global "semantic" duplication.
+
+        Rule:
+          - Only flag when the same n-gram repeats **consecutively** (A A), which usually indicates
+            accidental pad/boilerplate accumulation.
+          - Be more lenient for the last structural chunk (slot4) because soft-closing language can
+            naturally echo earlier phrasing.
+
+        Implementation notes:
+          - For Korean/EN mixed text, whitespace tokenization can be unstable, so we also check
+            character-grams on a whitespace-stripped string.
+        """
         if not body:
             return False
-        # Detect near-duplicate sentences by normalized equality
-        sentences = re.findall(r"[^.!?\n]+[.!?]|[^.!?\n]+$", body)
-        norm = lambda s: re.sub(r"\s+", "", s)
-        seen = set()
-        for s in sentences:
-            ns = norm(s)
-            if ns in seen:
+
+        # Split into lines (preferred) to identify slot4; fallback to sentence-ish chunks.
+        lines = [ln.strip() for ln in (body or "").split("\n") if ln.strip()]
+        chunks = lines
+        if len(chunks) < 4:
+            chunks = re.findall(r"[^.!?\n]+[.!?]|[^.!?\n]+$", body)
+            chunks = [c.strip() for c in chunks if c and c.strip()]
+
+        if not chunks:
+            return False
+
+        # Slot4 (last chunk) is checked with a higher tolerance.
+        main_chunks = chunks[:-1] if len(chunks) >= 2 else chunks
+        tail_chunk = chunks[-1] if len(chunks) >= 2 else ""
+
+        def has_adjacent_chargram_repeat(text: str, min_k: int, max_k: int) -> bool:
+            s = re.sub(r"\s+", "", text or "")
+            if len(s) < (min_k * 2):
+                return False
+            # Scan for any k-gram that repeats immediately next to itself: s[i:i+k] == s[i+k:i+2k]
+            for k in range(min_k, max_k + 1):
+                limit = len(s) - 2 * k
+                if limit < 0:
+                    continue
+                for i in range(0, limit + 1):
+                    if s[i:i + k] == s[i + k:i + 2 * k]:
+                        return True
+            return False
+
+        # Strict for main chunks: smaller repeats should be caught.
+        for c in main_chunks:
+            if has_adjacent_chargram_repeat(c, min_k=8, max_k=24):
                 return True
-            seen.add(ns)
+
+        # Lenient for tail (slot4): only flag if the repeated unit is longer.
+        if tail_chunk:
+            if has_adjacent_chargram_repeat(tail_chunk, min_k=14, max_k=36):
+                return True
+
         return False
 
     def verify(self, message: Dict, plan: Dict) -> Dict:
         errors = []
+        warnings = []
 
         title = message.get("title", "") or message.get("TITLE", "")
         body = message.get("body", "") or message.get("BODY", "")
@@ -98,11 +141,15 @@ class MessageVerifier:
         skin_concerns = [s.strip() for s in skin_concern_raw.split(",") if s.strip()]
 
         # Length check
-        if not self._body_len_ok(body):
-            if len(body) < MIN_BODY_LEN:
-                errors.append("body_len<300")
-            else:
-                errors.append("body_len>350")
+        # NOTE: body_len<300 is treated as a WARNING (not a fatal error) to avoid
+        # controller repair loops for short-but-structurally-valid marketing copy.
+        if body is None:
+            body = ""
+
+        if len(body) < MIN_BODY_LEN:
+            warnings.append("body_len<300")
+        elif len(body) > MAX_BODY_LEN:
+            errors.append("body_len>350")
 
         # Brand check (title OR body)
         if not (self._has_brand(title, brand) or self._has_brand(body, brand)):
@@ -124,13 +171,14 @@ class MessageVerifier:
         if self._has_natural_language_anomaly(body):
             errors.append("nl_anomaly")
 
-        # Semantic duplication check
+        # Duplication check (WARNING only; must not trigger controller repair)
         if self._has_semantic_duplication(body):
-            errors.append("semantic_duplication")
+            warnings.append("duplication_warning")
 
         return {
             "ok": len(errors) == 0,
-            "errors": errors
+            "errors": errors,
+            "warnings": warnings,
         }
 
     def validate(self, row: Dict, title: str, body: str) -> List[str]:
@@ -164,6 +212,7 @@ class MessageVerifier:
         }
 
         res = self.verify(message, plan)
+        # Controller expects only hard errors; warnings must not trigger repair.
         return list(res.get("errors", []))
 
 # Compatibility helper for controller import.

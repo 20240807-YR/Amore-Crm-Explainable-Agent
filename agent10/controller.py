@@ -151,6 +151,94 @@ def _looks_like_refusal(msg: str) -> bool:
     return ("요청을 처리할 수 없습니다" in s) or ("죄송합니다" in s and "TITLE:" not in s)
 
 
+# --- Literal warnings detector: controller must not rewrite message content. ---
+def _detect_literal_warnings(clean_body: str, brand: str, product_name: str, skin_concern: str) -> list:
+    """
+    Controller must not rewrite message content.
+    This helper only detects potential literal/structure issues and returns warnings.
+    """
+    warnings = []
+    body = (clean_body or "").strip()
+    if not body:
+        warnings.append("empty_body")
+        return warnings
+
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+
+    if brand:
+        if brand not in body:
+            warnings.append("brand_missing")
+        # dangling brand token line (common artifact)
+        if lines and lines[-1] == brand:
+            warnings.append("dangling_brand_token")
+
+    if product_name and product_name not in body:
+        warnings.append("product_missing")
+
+    concerns = []
+    for c in str(skin_concern or "").split(","):
+        cc = c.strip()
+        if cc:
+            concerns.append(cc)
+    if concerns:
+        primary = concerns[0]
+        if primary and primary not in body:
+            warnings.append("skin_concern_missing")
+
+    return warnings
+
+def _ensure_required_literals(clean_body: str, brand: str, product_name: str, skin_concern: str) -> str:
+    """
+    Controller-side literal injection (single pass, post-narration).
+    Narrator should not be forced to append dangling brand tokens.
+    """
+    body = (clean_body or "").strip()
+    if not body:
+        return body
+
+    # Normalize lines
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    if not lines:
+        return body
+
+    # If last line is ONLY the brand token, rewrite it into a proper closing sentence.
+    if brand and lines[-1] == brand:
+        lines[-1] = f"{brand}로 마무리해요."
+
+    joined = "\n".join(lines)
+
+    # Ensure brand exists somewhere in BODY
+    if brand and brand not in joined:
+        lines[-1] = (lines[-1].rstrip() + f" {brand}").strip()
+
+    joined = "\n".join(lines)
+
+    # Ensure product anchor exists somewhere in BODY
+    if product_name and product_name not in joined:
+        # Prefer adding to the 2nd line if exists, else add to the last line.
+        if len(lines) >= 2:
+            lines[1] = (lines[1].rstrip() + f" {product_name}").strip()
+        else:
+            lines[-1] = (lines[-1].rstrip() + f" {product_name}").strip()
+
+    joined = "\n".join(lines)
+
+    # Ensure at least one skin concern token is mentioned (first concern only)
+    concerns = []
+    for c in str(skin_concern or "").split(","):
+        cc = c.strip()
+        if cc:
+            concerns.append(cc)
+
+    if concerns:
+        primary = concerns[0]
+        if primary and primary not in joined:
+            # Add to first line to keep the flow natural (single pass append).
+            lines[0] = (lines[0].rstrip() + f" ({primary})").strip()
+
+    return "\n".join(lines)
+
+
 def _choose_brand_rule(brand_rule_list, i: int):
     if not brand_rule_list:
         return None
@@ -285,9 +373,13 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         # slot1 should only see environment/context keywords to prevent grammar collisions
         r["lifestyle_keywords"] = env_kw
 
-        # slot2 can optionally use these
+        # slot2 should treat routine/time cues as *optional hints* (not hard constraints)
         r["routine_keywords"] = routine_kw
-        r["routine_phrase"] = _extract_routine_phrase(routine_kw)
+
+        rp = _extract_routine_phrase(routine_kw)
+        # keep backward compatibility, but narrator/planner should prefer slot2_hints
+        r["routine_phrase"] = rp
+        r["slot2_hints"] = [rp] if rp else []
 
     planner = ReActReasoningAgent(llm, tone_map)
     narrator = StrategyNarrator(llm, tone_profile_map=tone_map)
@@ -354,14 +446,17 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             print(f"[controller] row {i}/{len(rows)} plan")
 
         plan = planner.plan(row)
-        # --- controller contract enforcement (slot safety) ---
-        # 1) limit lifestyle_expanded volume
-        le = plan.get("lifestyle_expanded")
-        if isinstance(le, list):
-            plan["lifestyle_expanded"] = le[:3]
-        elif isinstance(le, str):
-            plan["lifestyle_expanded"] = le.strip()
 
+        # --- normalize outline to slot tags (reduce semantic over-specification) ---
+        # We keep a stable 4-slot ordering to allow freer wording inside each slot.
+        plan["message_outline"] = [
+            "slot1_environment",
+            "slot2_offer",
+            "slot3_usage_flow",
+            "slot4_soft_close",
+        ]
+
+        # --- controller contract enforcement (slot safety) ---
         # 2) hard product anchor (prevent slot2 being eaten)
         plan["product_anchor"] = product_name
 
@@ -376,9 +471,8 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
 
         # must include -> plan
         must_include = brand_rule.get("must_include", "")
-        plan["brand_must_include"] = [
-            w.strip() for w in str(must_include).split(",") if w.strip()
-        ]
+        plan["brand_must_include_raw"] = str(must_include)
+        plan["brand_must_include"] = [w.strip() for w in str(must_include).split(",") if w.strip()]
 
         if verbose:
             print(f"[controller] row {i}/{len(rows)} generate")
@@ -393,6 +487,16 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             title, body = _parse_title_body(msg)
 
         clean_body = body.replace("BODY:", "", 1).strip()
+
+        # Controller must not rewrite body content.
+        # Detect only and attach warnings for downstream inspection.
+        literal_warnings = _detect_literal_warnings(
+            clean_body=clean_body,
+            brand=brand,
+            product_name=product_name,
+            skin_concern=row.get("skin_concern", ""),
+        )
+
         body = "BODY: " + clean_body
 
         # Validate ONLY the primary (top-1) message.
@@ -423,6 +527,7 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             "brand": brand,
             "message": f"{title}\n{body}",
             "errors": errs,
+            "warnings": literal_warnings,
             "plan": plan,
             "row": row,
             "brand_rule": brand_rule,
