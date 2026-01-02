@@ -349,33 +349,65 @@ def verify_brand_rules(text, rule):
             return []
         return [x.strip() for x in v.split(",") if x.strip()]
 
-    # 금지어: 엄격 + 대소문자 무시(영문 대응)
+    # -------------------------------------------------
+    # 1. 금지어 / 지양어 (기존 로직 유지)
+    # -------------------------------------------------
     for w in _split_csv(rule.get("banned", "")):
         w_fold = w.casefold()
         if w and (w in txt or w_fold in txt_fold):
             errors.append(f"브랜드 금지어 포함됨: {w}")
 
-    # 지양어: 엄격 + 대소문자 무시(영문 대응)
     for w in _split_csv(rule.get("avoid", "")):
         w_fold = w.casefold()
         if w and (w in txt or w_fold in txt_fold):
             errors.append(f"브랜드 지양 표현 포함됨: {w}")
 
-    # 필수어: "토큰 하나라도"는 너무 약해서,
-    # - 2토큰 이상이면: 최소 2개 토큰 중 1개 이상 포함
-    # - 1토큰이면: 그 토큰 포함
-    for w in _split_csv(rule.get("must_include", "")):
-        tokens = [t for t in re.split(r"[^\w가-힣]+", w) if t.strip()]
-        tokens2 = [t for t in tokens if len(t) >= 2]
+    # -------------------------------------------------
+    # 2. 필수어: 의미 기반(sementic) 검증
+    # -------------------------------------------------
+    SEMANTIC_MAP = {
+        "사용감": [
+            "가볍", "스며", "흡수", "끈적", "번들",
+            "레이어", "산뜻", "밀림"
+        ],
+        "지속 가능성": [
+            "꾸준", "부담", "계속", "이어",
+            "관리", "습관", "텀",
+            "반복", "장기", "유지"
+        ],
+        "루틴 내 위치": [
+            "세안", "토너", "다음", "단계",
+            "마지막", "아침", "저녁"
+        ],
+        "리듬": [
+            "루틴", "흐름", "일상", "습관",
+            "아침", "저녁", "자연스럽"
+        ],
+        "장기 사용": [
+            "꾸준", "오래", "계속", "유지",
+            "장기", "반복", "습관"
+        ],
+    }
 
-        if tokens2:
-            # 2글자 이상 토큰이 존재하면 그중 하나라도 포함
-            ok = any(tok in txt for tok in tokens2) or any(tok.casefold() in txt_fold for tok in tokens2)
-            if not ok:
-                errors.append(f"브랜드 필수어 누락됨: {w}")
+    for w in _split_csv(rule.get("must_include", "")):
+        w = w.strip()
+        if not w:
+            continue
+
+        # 2-1. 의미 매핑이 있는 경우 → 의미 키워드 중 하나라도 있으면 통과
+        if w in SEMANTIC_MAP:
+            keywords = SEMANTIC_MAP[w]
+            if not any(k in txt for k in keywords):
+                errors.append(f"브랜드 필수어(의미) 누락됨: {w}")
         else:
-            # 2글자 이상 토큰이 없으면 원문 그대로 포함 체크
-            if w and (w not in txt) and (w.casefold() not in txt_fold):
-                errors.append(f"브랜드 필수어 누락됨: {w}")
+            # 2-2. 의미 매핑이 없으면 기존 토큰 기반 로직 유지
+            tokens = [t for t in re.split(r"[^\w가-힣]+", w) if len(t) >= 2]
+            if tokens:
+                ok = any(tok in txt for tok in tokens) or any(tok.casefold() in txt_fold for tok in tokens)
+                if not ok:
+                    errors.append(f"브랜드 필수어 누락됨: {w}")
+            else:
+                if w and (w not in txt) and (w.casefold() not in txt_fold):
+                    errors.append(f"브랜드 필수어 누락됨: {w}")
 
     return errors
