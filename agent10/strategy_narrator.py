@@ -28,6 +28,13 @@ class StrategyNarrator:
             "가볍게 마무리돼 다음 단계가 수월해요.",
         ]
 
+        # slot4 전용 패딩 풀 (문단 단위 유지, 짧은 문장 나열 금지)
+        self.slot4_pad_pool = [
+            "부담 없이 이어가기 좋고, 손이 자주 가는 편이에요.",
+            "관리 텀이 조금 비어도 다시 시작하기 어렵지 않아요.",
+            "일상 흐름을 끊지 않고 자연스럽게 이어져요.",
+        ]
+
         # meta/기획/CTA 금지(강제)
         self.meta_ban_phrases = [
             "브랜드 톤을 유지하며",
@@ -80,15 +87,68 @@ class StrategyNarrator:
         return self._s(v)
 
     def _lifestyle_phrase(self, lifestyle: str) -> str:
-        s = self._s(lifestyle)
-        if not s:
+        """
+        slot1(환경/상황)용 라이프스타일 문구 생성.
+        - 행동/루틴/시간(예: "출근 전 5분 루틴")은 slot1에서 제거한다.
+        - 숫자만 남아 "5에" 같은 파편이 생기지 않도록 방지한다.
+        - "마스크 잦음"처럼 명사 키워드는 자연어로 최소 정규화한다.
+        """
+        raw = self._s(lifestyle)
+        if not raw:
             return ""
-        parts = [p.strip() for p in s.split(",") if p.strip()]
-        if len(parts) <= 1:
-            return s
-        if len(parts) == 2:
-            return f"{parts[0]}에 {parts[1]}까지 겹치는 날엔"
-        return f"{parts[0]}에 {parts[1]} 바람까지 맞고, {parts[2]}도 잦은 날엔"
+
+        # 1) 콤마 기반 키워드 분리
+        tokens = [t.strip() for t in raw.split(",") if t and t.strip()]
+        if not tokens:
+            return ""
+
+        # 2) slot1에서 배제해야 하는(행동/루틴/시간) 마커
+        routine_markers = ["루틴", "출근", "분", "아침", "저녁", "단계", "전", "후", "세안", "토너"]
+
+        env_tokens: List[str] = []
+        for t in tokens:
+            # 루틴/시간 토큰은 slot1에서 제외
+            if any(m in t for m in routine_markers):
+                continue
+
+            # 숫자/기호만 남은 토큰 제거 (예: "5")
+            if re.fullmatch(r"[0-9]+", t):
+                continue
+
+            # 최소 자연어 정규화
+            tt = t
+            # '잦음' → '잦은' 형태로 정규화
+            tt = tt.replace("잦음", "잦은")
+            # '마스크 잦은' → '마스크 착용이 잦은'
+            if "마스크" in tt and "착용" not in tt:
+                # '마스크 잦은' / '마스크 잦은 환경' 등
+                tt = tt.replace("마스크", "마스크 착용")
+            if "마스크 착용" in tt and "잦" in tt and "착용이" not in tt:
+                tt = tt.replace("마스크 착용", "마스크 착용이")
+
+            # '사무실 에어컨'은 '에어컨 바람'으로 자연화
+            if "에어컨" in tt and "바람" not in tt:
+                tt = tt.replace("에어컨", "에어컨 바람")
+
+            tt = tt.strip()
+            if not tt:
+                continue
+            env_tokens.append(tt)
+
+        # 3) 환경 토큰이 하나도 없으면 무리하게 만들지 않고 빈 문자열 반환
+        # (slot1 기본 문장 템플릿에서 안전한 기본값으로 처리)
+        if not env_tokens:
+            return ""
+
+        # 4) slot1 문장 앞부분용 구문 생성 (조사 충돌/중복 최소화)
+        if len(env_tokens) == 1:
+            return env_tokens[0]
+        if len(env_tokens) == 2:
+            return f"{env_tokens[0]}까지 겹치는 날엔"
+
+        # 3개 이상이면 앞 3개만 사용
+        a, b, c = env_tokens[0], env_tokens[1], env_tokens[2]
+        return f"{a}까지 겹치고, {b}도 느껴지는 데다 {c}까지 신경 쓰이는 날엔"
 
     def _get_url(self, row: Dict[str, Any]) -> str:
         for k in ["url", "URL", "product_url", "productURL", "상품URL", "상품_url", "link", "링크"]:
@@ -145,87 +205,42 @@ class StrategyNarrator:
             lines.append("")
         return "\n".join(lines[:4])
 
+    def _build_slot4_paragraph(self, brand_name: str, avoid_phrases: Optional[List[str]] = None) -> str:
+        """
+        slot4는 항상 하나의 문단으로 생성한다.
+        (완곡 → 사용감/편의성 → 브랜드 클로징)
+        """
+        avoid_phrases = avoid_phrases or []
+
+        s1 = "관리 텀이 조금 비어도 괜찮아요."
+        s2 = self.slot4_pad_pool[0]
+        s3 = f"그래서 {brand_name}와 함께라면 일상 속에서 부담 없이 이어가기 좋아요."
+
+        paragraph = f"{s1} {s2} {s3}"
+
+        for p in avoid_phrases:
+            paragraph = paragraph.replace(p, "")
+
+        return self._hard_clean(paragraph)
+
     def _fit_len_300_350(self, lines: List[str]) -> Tuple[List[str], str]:
-        # 1) 4줄 고정 + 클린
-        lines = [self._hard_clean(x) for x in (lines[:4] if lines else [])]
-        while len(lines) < 4:
-            lines.append("")
+        lines = [self._hard_clean(x) for x in lines]
+        body = self._join_4lines(lines)
 
-        # 2) 빈 문단 채우기 (4문단 유지)
-        pad_pool = [self._s(x) for x in (self.pad_pool or []) if self._s(x)]
-        if not pad_pool:
-            pad_pool = [
-                "오늘 컨디션에 맞춰 가볍게 얹기 좋아요.",
-                "부담 없이 매일 이어가기 편해요.",
-                "가볍게 마무리돼 다음 단계가 수월해요.",
-                "바쁠수록 짧게 정리되는 루틴이 편하죠.",
-            ]
-        pi = 0
-        for i in range(4):
-            if not self._s(lines[i]):
-                lines[i] = pad_pool[pi % len(pad_pool)]
-                pi += 1
-
-        # 3) 기본 바디 생성 (줄바꿈 유지)
-        final_body = self._join_4lines(lines).rstrip()
-        final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
-
-        # 4) 300 미만이면 4번째 문단에 padding 추가 (결정론적)
         safety = 0
-        while len(final_body) < 300 and safety < 80:
-            add = pad_pool[pi % len(pad_pool)]
-            pi += 1
-            if add and add not in lines[3]:
-                lines[3] = (self._s(lines[3]) + " " + add).strip()
-                lines[3] = self._hard_clean(lines[3])
-                final_body = self._join_4lines(lines).rstrip()
-                final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
-            else:
-                # 중복이면 짧은 고정 문장으로 채움
-                lines[3] = (self._s(lines[3]) + " 오늘도 가볍게 수분을 챙겨요.").strip()
-                lines[3] = self._hard_clean(lines[3])
-                final_body = self._join_4lines(lines).rstrip()
-                final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
+        while len(body) < 300 and safety < 50:
+            # slot4는 이미 완결 문단 → 길이 보정에 재사용 금지
+            idx = safety % 3  # slot1~3만 순환
+            lines[idx] = self._hard_clean(
+                lines[idx] + " " + self.pad_pool[safety % len(self.pad_pool)]
+            )
+            body = self._join_4lines(lines)
             safety += 1
 
-        # 5) 350 초과 정책: slot4 우선 축소 → 그래도 초과면 트림 (절대 discard 금지)
-        if len(final_body) > 350:
-            # (a) slot4를 먼저 비우고 재계산
-            lines = [self._s(x) for x in lines[:3]] + [""]
-            final_body = self._join_4lines(lines).rstrip()
-            final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
+        if len(body) > 350:
+            body = body[:350].rstrip()
 
-        # (b) 그래도 350 초과면: 뒤에서부터 트림하여 350 이내로 맞춤
-        if len(final_body) > 350:
-            def _trim_to(max_len: int, lines4: List[str]):
-                order = [3, 2, 1, 0]  # slot4 -> slot3 -> slot2 -> slot1
-                safety = 0
-                while safety < 400:
-                    body_now = self._join_4lines(lines4).rstrip()
-                    body_now = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", body_now)
-                    if len(body_now) <= max_len:
-                        return lines4, body_now
-
-                    cut_done = False
-                    for idx in order:
-                        s = self._s(lines4[idx])
-                        if len(s) > 20:
-                            lines4[idx] = self._hard_clean(s[:-5].rstrip())
-                            cut_done = True
-                            break
-                    if not cut_done:
-                        break
-                    safety += 1
-
-                body_now = self._join_4lines(lines4).rstrip()
-                body_now = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", body_now)
-                if len(body_now) > max_len:
-                    body_now = body_now[:max_len].rstrip()
-                return lines4, body_now
-
-            lines, final_body = _trim_to(350, [self._s(x) for x in lines[:4]])
-
-        return lines, final_body
+        return lines, body
 
     def _ensure_len_300_350(self, body: str) -> str:
         """
@@ -413,6 +428,9 @@ class StrategyNarrator:
         # BODY/프롬프트에는 row.lifestyle(짧은 원문)만 사용.
         lifestyle_raw = self._as_text(row.get("lifestyle", ""))
         lifestyle_phrase = self._lifestyle_phrase(lifestyle_raw)
+        if not lifestyle_phrase:
+            # 환경 토큰이 없거나 제거되어 비면, slot1에서 무리하게 키워드를 끌어오지 않는다.
+            lifestyle_phrase = "실내 환경이 건조한 날엔"
 
         # -------------------------
         # must_include 의미화 (단어 자체 금지)
@@ -459,12 +477,13 @@ class StrategyNarrator:
             # slot1: 광고 첫 문장. 상황 공감 또는 오늘/요즘 컨디션 언급.
             l1 = f"요즘처럼 {lifestyle_phrase} 환경에서는 피부 컨디션이 쉽게 달라질 수 있어요."
             # slot2: 문제 인식 후 제품을 '제안'하는 문장. 설명 금지.
-            l2 = f"{concerns_str}이 신경 쓰일 때는 {product_anchor}을 한 번 써보는 건 어떨까요?"
+            l2 = f"출근 전 5분처럼 짧은 시간에 {concerns_str}이 신경 쓰일 때는 {product_anchor}을 한 번 써보는 건 어떨까요?"
             # slot3: 사용 장면을 떠올리게 하는 루틴/상황 연결 문장.
             l3 = "세안 후 토너 다음 단계에서 가볍게 발라주면, 일상 루틴에 부담 없이 더할 수 있어요."
-            # slot4: 부담 없는 재사용/구매를 암시하는 완곡한 마무리 문장.
-            l4 = "최근 관리 텀이 조금 길어졌더라도 괜찮아요. 오늘 컨디션에 맞춰 가볍게 다시 시작해보세요."
-            return [self._hard_clean(l1), self._hard_clean(l2), self._hard_clean(l3), self._hard_clean(l4)]
+            # slot4: fallback slot4는 _build_slot4_paragraph 사용
+            slots = [self._hard_clean(l1), self._hard_clean(l2), self._hard_clean(l3), ""]
+            slots[3] = self._build_slot4_paragraph(brand_name)
+            return slots
 
         def _validate_slots(slots: List[str]) -> None:
             if len(slots) != 4:
@@ -509,7 +528,7 @@ class StrategyNarrator:
 
                 user_p = f"""
 [입력]
-- 라이프스타일: {lifestyle}
+- 라이프스타일: {lifestyle_raw}
 - 피부 고민: {skin_concern}
 - 추천 제품(상품명 그대로 포함): {product_name}
 

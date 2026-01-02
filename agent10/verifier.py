@@ -59,6 +59,33 @@ class MessageVerifier:
     def _body_len_ok(self, body: str) -> bool:
         return MIN_BODY_LEN <= len(body) <= MAX_BODY_LEN
 
+    def _has_natural_language_anomaly(self, body: str) -> bool:
+        if not body:
+            return False
+        # Simple anomaly patterns
+        patterns = [
+            r"\b5에\b",                 # stray numeral + particle
+            r"(잦음)\s*도\s*\1",        # duplicated token like '잦음도 잦음'
+        ]
+        for p in patterns:
+            if re.search(p, body):
+                return True
+        return False
+
+    def _has_semantic_duplication(self, body: str) -> bool:
+        if not body:
+            return False
+        # Detect near-duplicate sentences by normalized equality
+        sentences = re.findall(r"[^.!?\n]+[.!?]|[^.!?\n]+$", body)
+        norm = lambda s: re.sub(r"\s+", "", s)
+        seen = set()
+        for s in sentences:
+            ns = norm(s)
+            if ns in seen:
+                return True
+            seen.add(ns)
+        return False
+
     def verify(self, message: Dict, plan: Dict) -> Dict:
         errors = []
 
@@ -92,6 +119,14 @@ class MessageVerifier:
         # Slot count check (require at least 4 lines)
         if self._count_slots(body) < 4:
             errors.append("slot_count<4")
+
+        # Natural language anomaly check
+        if self._has_natural_language_anomaly(body):
+            errors.append("nl_anomaly")
+
+        # Semantic duplication check
+        if self._has_semantic_duplication(body):
+            errors.append("semantic_duplication")
 
         return {
             "ok": len(errors) == 0,

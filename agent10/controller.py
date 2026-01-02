@@ -2,6 +2,7 @@ import os
 import time
 import sys
 import csv
+import re
 from pathlib import Path
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -29,6 +30,77 @@ from brand_rules import load_brand_rules
 # -------------------------------------------------
 DEFAULT_SKIN_CONCERN = "건조와 유수분 밸런스"
 DEFAULT_LIFESTYLE = "일상적인 실내 생활"
+
+
+# lifestyle keyword hygiene (controller-side)
+# - Keep environment/context keywords for slot1
+# - Move routine/time/behavior keywords to slot2 via dedicated fields
+
+def _dedup_keep_order(items):
+    seen = set()
+    out = []
+    for x in items:
+        if not x:
+            continue
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _norm_lifestyle_keyword(k: str) -> str:
+    k = (k or "").strip()
+    k = re.sub(r"\s+", " ", k)
+
+    # common noisy forms -> more sentence-friendly phrases
+    if k == "마스크 잦음":
+        return "마스크 착용이 잦은 날"
+    if "마스크" in k and k.endswith("잦음"):
+        return "마스크 착용이 잦은 날"
+
+    if "사무실" in k and "에어컨" in k:
+        return "사무실 에어컨 바람"
+
+    return k
+
+
+def _is_routine_like(k: str) -> bool:
+    if not k:
+        return False
+    # routine/time/behavior cues
+    routine_markers = ["루틴", "출근", "퇴근", "분", "아침", "저녁", "밤", "운동", "야근", "샤워", "세안"]
+    return any(m in k for m in routine_markers)
+
+
+def _split_lifestyle_keywords(lifestyle_raw: str):
+    raw_parts = [p.strip() for p in str(lifestyle_raw or "").split(",") if p.strip()]
+    parts = [_norm_lifestyle_keyword(p) for p in raw_parts]
+
+    routine = []
+    env = []
+    for p in parts:
+        if _is_routine_like(p):
+            routine.append(p)
+        else:
+            env.append(p)
+
+    return _dedup_keep_order(env), _dedup_keep_order(routine)
+
+
+def _extract_routine_phrase(routine_keywords):
+    # Prefer the canonical '출근 전 5분 루틴' if present; otherwise first routine keyword.
+    if not routine_keywords:
+        return ""
+    for rk in routine_keywords:
+        if "출근" in rk and "5" in rk and "루틴" in rk:
+            # make it slot2-friendly (avoid '5에' artifacts)
+            return "출근 전 5분"
+    # general cleanup
+    rk0 = routine_keywords[0]
+    if rk0.endswith("루틴"):
+        rk0 = rk0.replace("루틴", "").strip()
+    return rk0
 
 
 def normalize_brand(b):
@@ -207,11 +279,15 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             continue
         r["skin_concern"] = _norm_text(r.get("skin_concern"), DEFAULT_SKIN_CONCERN)
         r["lifestyle"] = _norm_text(r.get("lifestyle"), DEFAULT_LIFESTYLE)
-        r["lifestyle_keywords"] = [
-            k.strip()
-            for k in str(r.get("lifestyle", "")).split(",")
-            if k.strip()
-        ]
+
+        env_kw, routine_kw = _split_lifestyle_keywords(r.get("lifestyle", ""))
+
+        # slot1 should only see environment/context keywords to prevent grammar collisions
+        r["lifestyle_keywords"] = env_kw
+
+        # slot2 can optionally use these
+        r["routine_keywords"] = routine_kw
+        r["routine_phrase"] = _extract_routine_phrase(routine_kw)
 
     planner = ReActReasoningAgent(llm, tone_map)
     narrator = StrategyNarrator(llm, tone_profile_map=tone_map)
