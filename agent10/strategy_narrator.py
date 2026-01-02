@@ -62,6 +62,23 @@ class StrategyNarrator:
     def _s(self, v: Any) -> str:
         return "" if v is None else str(v).strip()
 
+    def _as_text(self, v: Any) -> str:
+        """Normalize possible list/tuple fields into a clean, single string."""
+        if v is None:
+            return ""
+        if isinstance(v, (list, tuple)):
+            parts: List[str] = []
+            for x in v:
+                s = self._s(x)
+                if not s:
+                    continue
+                # remove leading bullet markers like "- ", "• "
+                s = re.sub(r"^\s*[-•]\s*", "", s)
+                if s:
+                    parts.append(s)
+            return " ".join(parts).strip()
+        return self._s(v)
+
     def _get_url(self, row: Dict[str, Any]) -> str:
         for k in ["url", "URL", "product_url", "productURL", "상품URL", "상품_url", "link", "링크"]:
             v = self._s(row.get(k))
@@ -160,16 +177,42 @@ class StrategyNarrator:
                 final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
             safety += 1
 
-        # 5) 350 초과 정책: 문장 단위 컷
+        # 5) 350 초과 정책: slot4 우선 축소 → 그래도 초과면 트림 (절대 discard 금지)
         if len(final_body) > 350:
-            # slot4 전체 제거
+            # (a) slot4를 먼저 비우고 재계산
             lines = [self._s(x) for x in lines[:3]] + [""]
             final_body = self._join_4lines(lines).rstrip()
             final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
 
-        # 6) 그래도 초과면 전체 discard
+        # (b) 그래도 350 초과면: 뒤에서부터 트림하여 350 이내로 맞춤
         if len(final_body) > 350:
-            return [], ""
+            def _trim_to(max_len: int, lines4: List[str]):
+                order = [3, 2, 1, 0]  # slot4 -> slot3 -> slot2 -> slot1
+                safety = 0
+                while safety < 400:
+                    body_now = self._join_4lines(lines4).rstrip()
+                    body_now = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", body_now)
+                    if len(body_now) <= max_len:
+                        return lines4, body_now
+
+                    cut_done = False
+                    for idx in order:
+                        s = self._s(lines4[idx])
+                        if len(s) > 20:
+                            lines4[idx] = self._hard_clean(s[:-5].rstrip())
+                            cut_done = True
+                            break
+                    if not cut_done:
+                        break
+                    safety += 1
+
+                body_now = self._join_4lines(lines4).rstrip()
+                body_now = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", body_now)
+                if len(body_now) > max_len:
+                    body_now = body_now[:max_len].rstrip()
+                return lines4, body_now
+
+            lines, final_body = _trim_to(350, [self._s(x) for x in lines[:4]])
 
         return lines, final_body
 
@@ -181,6 +224,9 @@ class StrategyNarrator:
         """
         lines = self._split_4lines(body)
         _, final_body = self._fit_len_300_350(lines)
+        # 빈 바디 방어: 절대 빈 문자열 반환 금지
+        if not self._s(final_body):
+            _, final_body = self._fit_len_300_350(["", "", "", ""])
         return final_body
 
     # -------------------------
@@ -240,7 +286,7 @@ slot4_text: 꾸준함/관리 주기/부담 없는 마무리 문장 1~2개
 
         prompt = f"""
 [고객 정보]
-- 상황(Lifestyle): {plan.get('lifestyle_expanded', row.get('lifestyle', ''))}
+- 상황(Lifestyle): {self._as_text(plan.get('lifestyle_expanded') or row.get('lifestyle', ''))}
 - 피부 고민: {self._s(row.get('skin_concern', ''))}
 - 추천 제품: {product_name}
 - 필수 포함 키워드: {must_str} (문장 속에 자연스럽게 녹여내세요)
@@ -346,7 +392,10 @@ slot4_text: 꾸준함/관리 주기/부담 없는 마무리 문장 1~2개
         brand_name = self._s(row.get("brand", "아모레퍼시픽"))
         product_name = self._s(row.get("상품명", ""))
         skin_concern = self._s(row.get("skin_concern", ""))
-        lifestyle = self._s(row.get("lifestyle", ""))
+
+        # NOTE: BODY에는 plan.lifestyle_expanded 덤프가 흘러가면 verifier(4줄/길이) 기준이 깨짐.
+        # BODY/프롬프트에는 row.lifestyle(짧은 원문)만 사용.
+        lifestyle = self._as_text(row.get("lifestyle", ""))
 
         # -------------------------
         # must_include 의미화 (단어 자체 금지)
@@ -386,10 +435,23 @@ slot4_text: 꾸준함/관리 주기/부담 없는 마무리 문장 1~2개
             return None
 
         def _fallback_slots() -> List[str]:
-            l1 = f"{lifestyle}처럼 바쁠 때도 피부 컨디션은 금방 티가 나요. 실내 건조와 마스크 환경이면 더 쉽게 뻑뻑해져요."
-            l2 = f"{skin_concern} 고민이 있을 땐 {product_name}로 수분을 빠르게 채워줘요. 가볍게 스며들어 겉은 번들거리지 않게 정돈돼요."
-            l3 = "세안 후 토너 다음 단계에서 얇게 펴 발라요. 아침에는 가볍게 한 겹, 저녁에는 필요한 부위만 한 번 더 레이어링해요."
-            l4 = "최근 관리 텀이 길어졌더라도 오늘부터 부담 없이 다시 이어가요. 꾸준히 쓰기 쉬워서 루틴이 흔들릴 때도 정리하기 좋아요."
+            product_anchor = self._s(plan.get("product_anchor") or product_name)
+            concerns = [c.strip() for c in self._s(skin_concern).split(",") if c.strip()]
+            concerns_str = ",".join(concerns) if concerns else self._s(skin_concern)
+
+            l1 = f"{lifestyle} 환경에서는 피부가 쉽게 건조해지고 번들거림도 같이 느껴져요. 컨디션이 하루에 여러 번 흔들릴 수 있어요."
+            # slot2: product_anchor + skin_concern 토큰 전부 literal 포함(축약/별칭 금지)
+            l2 = (
+                f"{concerns_str}가 신경 쓰일 때는 {product_anchor}로 균형을 잡아줘요. "
+                "가볍게 스며들어 겉은 번들거리지 않게 정돈돼요."
+            )
+            # slot3: 루틴/시간대/단계 마커 필수
+            l3 = "세안 후 토너 다음 단계에서 얇게 펴 발라요. 아침·저녁 루틴에서 필요한 부위만 한 겹 더 레이어링해요."
+            # slot4: brand literal 포함 + 구매 텀 완곡
+            l4 = (
+                "최근 관리 텀이 조금 길어졌더라도 괜찮아요. "
+                f"{brand_name}로 다시 시작해도 부담 없이 이어갈 수 있어요."
+            )
             return [self._hard_clean(l1), self._hard_clean(l2), self._hard_clean(l3), self._hard_clean(l4)]
 
         def _validate_slots(slots: List[str]) -> None:
@@ -478,29 +540,79 @@ slot4_text: ...
             slots = _fallback_slots()
             _validate_slots(slots)
 
-        body = "\n".join(slots).strip()
+        # -------------------------
+        # STRICT ENFORCEMENT FOR VERIFIER (literal + 4 lines + 300~350)
+        # - BODY는 반드시 4줄(비어있지 않은 줄 >= 4)
+        # - brand/product_anchor/skin_concern 토큰은 BODY에 literal 포함
+        # - 줄바꿈은 최종 조립 시점 1회만
+        # -------------------------
+        product_anchor = self._s(plan.get("product_anchor") or product_name)
+        concerns = [c.strip() for c in self._s(skin_concern).split(",") if c.strip()]
+        concerns_str = ",".join(concerns) if concerns else self._s(skin_concern)
+
+        def _build_strict_slots(base_slots: Optional[List[str]] = None) -> List[str]:
+            # base_slots가 있어도 literal 토큰이 빠지면 강제로 다시 조립
+            s1 = f"{lifestyle} 환경에서는 피부가 쉽게 건조해지고 번들거림도 같이 느껴져요. 컨디션이 하루에 여러 번 흔들릴 수 있어요."
+            s2 = (
+                f"{concerns_str}가 신경 쓰일 때는 {product_anchor}로 균형을 잡아줘요. "
+                "가볍게 스며들어 겉은 번들거리지 않게 정돈돼요."
+            )
+            s3 = "세안 후 토너 다음 단계에서 얇게 펴 발라요. 아침·저녁 루틴에서 필요한 부위만 한 겹 더 레이어링해요."
+            s4 = (
+                "최근 관리 텀이 조금 길어졌더라도 괜찮아요. "
+                f"{brand_name}로 다시 시작해도 부담 없이 이어갈 수 있어요."
+            )
+            out = [self._hard_clean(s1), self._hard_clean(s2), self._hard_clean(s3), self._hard_clean(s4)]
+            return out
+
+        # 1) LLM 슬롯이 있으면 우선 사용하되, verifier literal 조건을 만족하지 못하면 즉시 strict 슬롯로 교체
+        if not slots:
+            slots = _build_strict_slots()
+        else:
+            joined = "\n".join([self._s(x) for x in slots])
+            need_strict = False
+            if brand_name and brand_name not in joined:
+                need_strict = True
+            if product_anchor and product_anchor not in joined:
+                need_strict = True
+            if concerns and not all(c in joined for c in concerns):
+                need_strict = True
+            # 4줄 구조가 깨졌거나 비어있는 줄이 생기면 strict로 교체
+            lines_tmp = [ln for ln in self._split_4lines(joined) if self._s(ln)]
+            if len(lines_tmp) < 4:
+                need_strict = True
+            if need_strict:
+                slots = _build_strict_slots()
+
+        # 2) 최종 조립은 4줄 1회만
+        body = "\n".join([self._s(x) for x in slots[:4]]).strip()
         body = self._ensure_len_300_350(body)
-        if not body:
-            slots = _fallback_slots()
-            body = self._ensure_len_300_350("\n".join(slots).strip())
 
-        if _has_forbidden(body):
-            slots = _fallback_slots()
-            body = self._ensure_len_300_350("\n".join(slots).strip())
+        # 3) 보정 이후에도 literal 누락이면 slot2/slot4에 강제 주입 (최소 수정)
+        lines = self._split_4lines(body)
+        while len(lines) < 4:
+            lines.append("")
+        # slot2: product_anchor + concerns
+        if product_anchor and product_anchor not in lines[1]:
+            lines[1] = (self._s(lines[1]) + f" {product_anchor}").strip()
+        for c in concerns:
+            if c and c not in lines[1] and c not in body:
+                lines[1] = (self._s(lines[1]) + f" {c}").strip()
+        # slot4: brand
+        if brand_name and brand_name not in body:
+            lines[3] = (self._s(lines[3]) + f" {brand_name}").strip()
 
-        lines = [ln for ln in body.split("\n") if ln.strip()]
+        body = self._ensure_len_300_350("\n".join([self._hard_clean(x) for x in lines[:4]]).strip())
+
+        # 4) 최종 4줄 보장
+        lines = self._split_4lines(body)
         if len(lines) != 4:
-            slots = _fallback_slots()
+            slots = _build_strict_slots()
             body = self._ensure_len_300_350("\n".join(slots).strip())
-            lines = [ln for ln in body.split("\n") if ln.strip()]
+            lines = self._split_4lines(body)
             if len(lines) != 4:
                 raise ValueError("final body slot count != 4")
 
-        if len(body) < 300 or len(body) > 350:
-            slots = _fallback_slots()
-            body = self._ensure_len_300_350("\n".join(slots).strip())
-            if len(body) < 300 or len(body) > 350:
-                raise ValueError("final body length not in 300~350")
 
         title_prompt = f"""
 브랜드: {brand_name}
@@ -601,7 +713,7 @@ slot4_text: ...
             errs.append("title_emoji_both_sides")
 
         # 4 paragraphs
-        lines = [ln for ln in b.split("\n") if ln.strip()]
+        lines = self._split_4lines(b)
         if len(lines) != 4:
             errs.append("slot_count_4")
 

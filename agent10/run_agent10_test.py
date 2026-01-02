@@ -67,6 +67,45 @@ for p in [AGENT_DIR_ABS, PROJECT_ROOT_ABS]:
         sys.path.insert(0, p_str)
 
 # -------------------------------------------------
+# 2-1. Verifier API 호환 패치 (런 스크립트 레벨)
+#   - controller가 verifier.verify(row, title, body) 형태로 호출하는 버전과,
+#     verifier.verify(title, body) 형태만 받는 버전이 섞여 있어 런에서 깨질 수 있음
+#   - 여기서는 controller import 전에 MessageVerifier.verify를 *signature-tolerant* 하게 래핑
+#   - verifier 로직 자체는 변경하지 않음(런타임 패치)
+# -------------------------------------------------
+try:
+    import inspect
+    import verifier as _verifier_mod  # noqa: E402
+
+    _MV = getattr(_verifier_mod, "MessageVerifier", None)
+    if _MV is not None and hasattr(_MV, "verify"):
+        _orig_verify = _MV.verify
+
+        def _verify_compat(self, *args, **kwargs):
+            # 가능한 호출 형태:
+            # 1) verify(title, body)
+            # 2) verify(row, title, body)
+            # 3) verify(text, brand, ...) 등 기타
+            # 여기서는 (row, title, body)로 들어오면 title/body만 추려서 원래 verify로 위임
+            if len(args) == 2:
+                return _orig_verify(self, args[0], args[1], **kwargs)
+            if len(args) >= 3:
+                # (row, title, body) 가정
+                return _orig_verify(self, args[-2], args[-1], **kwargs)
+            return _orig_verify(self, *args, **kwargs)
+
+        # 이미 호환 래핑이 적용되어 있지 않을 때만 교체
+        try:
+            sig = str(inspect.signature(_MV.verify))
+        except Exception:
+            sig = ""
+        if "*args" not in sig:
+            _MV.verify = _verify_compat
+except Exception:
+    # 런 스크립트 레벨에서만 안전하게 무시
+    pass
+
+# -------------------------------------------------
 # 3. Controller 실행 (진행이 보이도록 래핑)
 # -------------------------------------------------
 log("import controller.main ...")
