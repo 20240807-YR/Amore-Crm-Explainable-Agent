@@ -160,36 +160,16 @@ class StrategyNarrator:
                 final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
             safety += 1
 
-        # 5) 350 초과면 공백 경계 기준으로 자르되, 4줄 구조는 유지
+        # 5) 350 초과 정책: 문장 단위 컷
         if len(final_body) > 350:
-            trimmed = final_body[:350]
-            sp = trimmed.rfind(" ")
-            if sp >= 280:
-                trimmed = trimmed[:sp]
-            trimmed = trimmed.rstrip()
-            # 마지막 줄로만 줄이기 (앞 3줄 보존)
-            first3 = lines[:3]
-            last = trimmed.split("\n")[-1].strip()
-            if not last:
-                last = self._s(lines[3])
-            lines = [self._s(x) for x in first3] + [self._hard_clean(last)]
+            # slot4 전체 제거
+            lines = [self._s(x) for x in lines[:3]] + [""]
             final_body = self._join_4lines(lines).rstrip()
             final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
 
-            # 그래도 길면 마지막 줄을 추가로 컷
-            if len(final_body) > 350:
-                # 마지막 문단만 350에 맞춰 컷
-                head = "\n".join([self._s(x) for x in lines[:3]]).strip()
-                remain = 350 - (len(head) + 1)  # +1 for newline
-                if remain < 10:
-                    remain = 10
-                last2 = self._s(lines[3])[:remain].rstrip()
-                sp2 = last2.rfind(" ")
-                if sp2 >= max(0, remain - 30):
-                    last2 = last2[:sp2].rstrip()
-                lines[3] = self._hard_clean(last2)
-                final_body = self._join_4lines(lines).rstrip()
-                final_body = re.sub(r"[\s\)\]\}.,!?:;…~]+$", "", final_body)
+        # 6) 그래도 초과면 전체 discard
+        if len(final_body) > 350:
+            return [], ""
 
         return lines, final_body
 
@@ -224,6 +204,26 @@ class StrategyNarrator:
 3. 길이: 전체 공백 포함 300~350자를 엄격히 준수하세요.
 4. 표현: '브랜드 톤을 유지하며', '기획된', '설계된' 등의 메타 설명어를 절대 쓰지 마세요.
 
+[LLM SLOT-ONLY 입력 예시]
+slot1_text:
+바쁜 아침 출근 준비로 시간이 부족해 피부가 쉽게 푸석해지는 상황이에요.
+
+slot2_text:
+가벼운 텍스처의 나이아시카 수딩 글로우 워터리 크림이 수분을 빠르게 채워줘요.
+
+slot3_text:
+세안 후 토너 다음 단계에서 매일 아침 5분 루틴으로 사용하기 좋아요.
+
+slot4_text:
+꾸준히 사용하면 아침마다 촉촉한 피부 컨디션을 유지할 수 있어요.
+
+[규칙]
+- 위 예시는 LLM이 생성해야 할 **출력 형식의 유일한 예시**입니다.
+- TITLE, BODY, 사용감, 루틴 내 위치 등 구조 토큰은 절대 포함하지 않습니다.
+- 각 슬롯은 순수 자연어 문장만 허용됩니다.
+
+
+[최종 출력 예시 — narrator 조립 결과용]
 [작성 예시 1]
 TITLE: ✨환절기 건조함, 설화수로 다스리세요✨
 BODY: 요즘처럼 일교차가 큰 날씨엔 피부 속당김이 더 심해지죠. 따뜻한 차 한 잔처럼 피부에도 깊은 보습이 필요해요.
@@ -251,6 +251,33 @@ BODY: 아침 출근 준비로 바쁜 하루가 시작되면 피부 속건조가 
 사무실 에어컨과 마스크로 피부가 푸석해질 때 프리메라 NEW 나이아시카 수딩 글로우 워터리 크림 30ml가 가볍게 수분을 채워줘요.
 세안 후 토너 다음 단계에서 얇게 펴 바르면 아침 루틴에도 부담 없이 스며들어 사용감이 편안해요.
 루틴 내 위치를 고민하지 않아도 매일 이어가기 쉬워 지속 가능성 측면에서도 자연스럽게 관리할 수 있어요.
+
+[작성 예시 5]
+TITLE: 🌙밤사이 촉촉함, 이니스프리와 함께해요🌙
+BODY: 하루 종일 에어컨 바람에 피부가 많이 건조해진 느낌, 공감하시나요?
+이럴 때 이니스프리 그린티 씨드 세럼이 피부 속까지 깊은 보습을 선사해 줄 거예요.
+저녁 세안 후 첫 단계에서 가볍게 펴 바르면 밤새 속부터 차오르는 촉촉함을 느낄 수 있어요.
+매일 밤 꾸준히 사용하면 아침마다 부드럽고 건강한 피부로 시작할 수 있습니다.
+
+[작성 예시 6]
+TITLE: ☀️햇살 아래에서도 산뜻하게, 헤라와 함께☀️
+BODY: 야외 활동이 많은 계절, 자외선과 미세먼지로 피부가 쉽게 지치죠.
+헤라 UV 미스트 쿠션이 가볍게 밀착되어 피부를 산뜻하게 보호해 줄 거예요.
+외출 전 마지막 단계로 두드려 바르면 자연스러운 커버와 동시에 자외선 차단 효과를 볼 수 있어요.
+하루 종일 들뜸 없이 촉촉한 피부로 자신감을 더해보세요.
+
+[작성 예시 7]
+TITLE: 🍃피부에 휴식을, 마몽드 카모마일 에센스와 함께🍃
+BODY: 일상 속 스트레스와 미세먼지로 피부가 쉽게 예민해지는 요즘이에요.
+마몽드 카모마일 퓨어 토너가 피부를 진정시키고 산뜻한 수분을 선사해 줄 거예요.
+세안 후 화장솜에 적셔 부드럽게 닦아내면 매일 아침저녁 루틴에 부담 없이 사용할 수 있어요.
+계속 사용하면 피부가 한층 더 편안해지고 건강한 컨디션을 유지할 수 있습니다.
+
+[구조 및 생성 제한 원칙]
+- LLM은 SLOT 텍스트만 생성 (TITLE/BODY/라벨 생성 금지)
+- 최종 TITLE/BODY 조립은 narrator에서만 수행
+- 길이 컷은 narrator 책임 (문장 단위 컷 → slot4 제거 → discard)
+- verifier는 판정만 수행
 """ + f"\n- 참고 톤 키워드: {list(self.tone_profile_map.keys())}\n"
 
     def _build_user_prompt(
@@ -317,31 +344,61 @@ BODY: 아침 출근 준비로 바쁜 하루가 시작되면 피부 속건조가 
 """
         return prompt
 
-    def _build_user_prompt_rewrite(
-        self,
-        free_text: str,
-        plan: Dict[str, Any],
-    ) -> str:
-        outline = plan.get("message_outline", [])
-        outline_text = "\n".join([f"- {o}" for o in outline])
 
-        prompt = f"""
-[재작성 지시]
-아래의 원문을 참고하여 마케팅 메시지를 다시 작성하세요.
+    # -------------------------
+    # New slot helper prompt builders
+    # -------------------------
+    def _build_user_prompt_slot_expand(self, free_text: str) -> str:
+        """
+        Asks LLM to output exactly 4 slots from the given text, no rewriting.
+        """
+        return (
+            "아래 텍스트의 정보를 활용하여 4개의 슬롯을 아래 형식으로 분리해 주세요:\n"
+            "SLOT1:\n...\nSLOT2:\n...\nSLOT3:\n...\nSLOT4:\n...\n"
+            "\n[규칙]\n"
+            "- 반드시 주어진 텍스트의 정보만 사용하세요. 어떤 새로운 표현, 어투, 재구성, 추가 정보도 금지합니다.\n"
+            "- 각 슬롯은 3~5문장으로, 원문에서 필요한 부분만 발췌하세요.\n"
+            "- 어떠한 경우에도 TITLE/BODY라는 단어, 라벨, 설명은 넣지 마세요.\n"
+            "- SLOT1~4 레이블은 반드시 정확히 지키세요.\n"
+            "\n[입력 텍스트]\n"
+            f"{free_text}\n"
+        )
 
-요구 사항:
-1. 반드시 TITLE/BODY 형식
-2. BODY는 정확히 4개의 단락 (줄바꿈)
-3. 단락 구조:
-{outline_text}
-4. 전체 길이: 공백 포함 300~350자
-5. 원문의 핵심 의미를 유지하되 표현은 새로 작성 (요약/재진술)
-6. 설명문, 자기언급, 메타 표현 금지
+    def _build_user_prompt_slot_summarize(self, slot_text: str, slot_id: int) -> str:
+        """
+        Summarizes slot text to strict char count, per slot.
+        """
+        char_rules = {
+            1: "60~80자 (환경/상황)",
+            2: "80~100자 (피부 고민+제품)",
+            3: "70~90자 (루틴/시간대 필수)",
+            4: "60~80자 (지속/구매 텀)"
+        }
+        rule = char_rules.get(slot_id, "70~90자")
+        return (
+            f"아래 SLOT{slot_id} 내용을 {rule}로 요약해 주세요.\n"
+            "- 반드시 원문의 의미만 요약, 재구성/재해석/새로운 정보 추가 금지\n"
+            "- SLOT{slot_id}의 핵심 정보만 남기고, 문장/어투/톤을 바꾸지 마세요.\n"
+            "- 반드시 한글로, 지정된 글자 수 내에서만 작성하세요.\n"
+            "- TITLE/BODY라는 단어 절대 금지\n"
+            "\n[SLOT{slot_id}]\n"
+            f"{slot_text}\n"
+        )
 
-[원문]
-{free_text}
-"""
-        return prompt
+    def _build_user_prompt_title_from_slots(self, slots_text: str) -> str:
+        """
+        Generate a title using only info NOT directly used in BODY, 25-40 chars, 1-2 emojis, no 설명체/하다체.
+        """
+        return (
+            "아래 4개의 슬롯 정보를 참고하여 제목을 한글 25~40자, 이모지 1~2개(앞/뒤 모두)에 맞춰 작성하세요.\n"
+            "- 반드시 BODY에 직접적으로 사용되지 않은 정보/포인트만 활용\n"
+            "- 설명체, 하다체, '~이다', '~합니다' 등 금지\n"
+            "- 제목에 TITLE/BODY라는 단어는 절대 금지\n"
+            "- 반드시 한글로, 자연스럽고 눈길을 끄는 표현만\n"
+            "- 이모지는 제목 앞뒤에 1~2개씩 포함\n"
+            "\n[슬롯 정보]\n"
+            f"{slots_text}\n"
+        )
 
     def generate(
         self,
@@ -351,20 +408,17 @@ BODY: 아침 출근 준비로 바쁜 하루가 시작되면 피부 속건조가 
         repair_errors: Optional[List[str]] = None,
     ) -> str:
         brand_name = self._s(row.get("brand", "아모레퍼시픽"))
-
-        # --- brand_rule control ---
         brand_rule = brand_rule or {}
-        banned_words = [w.strip() for w in str(brand_rule.get("banned", "")).split(",") if w.strip()]
-        avoid_words = [w.strip() for w in str(brand_rule.get("avoid", "")).split(",") if w.strip()]
-
-        # --- fields ---
         product_name = self._s(row.get("상품명", ""))
         skin_concern = self._s(row.get("skin_concern", ""))
         lifestyle = self._s(row.get("lifestyle", ""))
-
-        tone_rules = self._s(plan.get("tone_rules", ""))
-        outline = plan.get("message_outline", [])
-        outline_text = "\n".join([f"- {self._s(o)}" for o in outline if self._s(o)])
+        pad_pool = self.pad_pool or [
+            "오늘 컨디션에 맞춰 가볍게 얹기 좋아요.",
+            "부담 없이 매일 이어가기 편해요.",
+            "끈적임이 덜해 손이 자주 가요.",
+            "바쁠수록 짧게 정리되는 루틴이 편하죠.",
+            "가볍게 마무리돼 다음 단계가 수월해요.",
+        ]
 
         # must include
         brand_must_include = plan.get("brand_must_include", [])
@@ -373,13 +427,8 @@ BODY: 아침 출근 준비로 바쁜 하루가 시작되면 피부 속건조가 
             if isinstance(bri, list) and bri:
                 brand_must_include = bri
 
-        must_str = ", ".join([self._s(x) for x in brand_must_include if self._s(x)]) if brand_must_include else ""
-
-        system_p = self._build_system_prompt(brand_name)
-
-        # --------------------------
         # Step 1) Free generation 600~1000
-        # --------------------------
+        system_p = self._build_system_prompt(brand_name)
         free_user_p = self._build_user_prompt_free(row, plan, brand_rule)
         free_messages = [
             {"role": "system", "content": system_p},
@@ -388,165 +437,93 @@ BODY: 아침 출근 준비로 바쁜 하루가 시작되면 피부 속건조가 
         free_text = self.llm.generate(messages=free_messages)
         free_text = self._s(free_text)
 
-        # --------------------------
-        # Step 2) Rewrite to 4 slots / 300~350 with up to 8 retries
-        # --------------------------
-        last_errs: List[str] = []
-        last_title = ""
-        last_body = ""
-
-        for attempt in range(8):
-            # Build rewrite prompt using the free_text as source
-            constraints = [
-                "반드시 TITLE/BODY 형식을 사용한다.",
-                "BODY는 줄바꿈 4문단(1:1:1:1)으로 작성한다.",
-                "문단 순서: 1) 라이프스타일 2) 제품/피부고민 연결 3) 루틴/시간대 4) 마무리 메시지.",
-                "BODY 길이는 공백 포함 300~350자이다.",
-                "반말 금지, 설명용 하다체/문어체(~이다/~한다/~있다, ~합니다/~입니다) 금지, 해요체로 작성한다.",
-                "브랜드명과 상품명을 BODY에 반드시 포함한다.",
-                f"브랜드 필수 키워드({must_str})는 BODY에 자연스럽게 포함한다." if must_str else "브랜드 필수 키워드가 있으면 BODY에 자연스럽게 포함한다.",
-                "중복 문장 금지, 메타/기획/전략 설명 문구 금지.",
-                "TITLE은 25~40자, 제목 앞뒤에 각각 이모지 최소 1개 포함한다.",
-                "페르소나 톤과 브랜드 톤이 느껴지는 어휘/리듬으로 작성한다(메타 표현으로 설명하지 말고 문장 자체로 반영).",
-            ]
-            if outline_text:
-                constraints.append("아래 4슬롯 가이드 문장을 문장 속에 녹이되, 라벨을 그대로 출력하지 않는다:\n" + outline_text)
-
-            repair_line = ""
-            if last_errs:
-                repair_line = "\n\n[수정 필요]\n- " + "\n- ".join(last_errs)
-
-            rewrite_prompt = (
-                "너는 한국어 CRM 마케팅 카피라이터다.\n\n"
-                "[제약]\n- " + "\n- ".join(constraints) +
-                repair_line +
-                "\n\n[필수 포함]\n"
-                f"- 브랜드: {brand_name}\n"
-                f"- 상품명: {product_name}\n"
-                + (f"- 브랜드 필수 키워드: {must_str}\n" if must_str else "")
-                + (f"- 톤 규칙: {tone_rules}\n" if tone_rules else "")
-                + "\n[브랜드 톤 힌트]\n"
-                + f"- 도입 방향: {brand_rule.get('opening','')}\n"
-                + f"- 루틴 설명: {brand_rule.get('routine','')}\n"
-                + f"- 마무리 방향: {brand_rule.get('closing','')}\n"
-                + "\n[원문(참고)]\n"
-                + free_text
-                + "\n"
-            )
-
-            rewrite_messages = [
+        # Step 2a) Slot expand
+        expanded_slots_text = ""
+        slot_parse_success = False
+        for attempt in range(3):
+            slot_expand_prompt = self._build_user_prompt_slot_expand(free_text)
+            slot_expand_messages = [
                 {"role": "system", "content": system_p},
-                {"role": "user", "content": rewrite_prompt},
+                {"role": "user", "content": slot_expand_prompt},
             ]
-            out = self.llm.generate(messages=rewrite_messages)
+            slot_expand_out = self.llm.generate(messages=slot_expand_messages)
+            expanded_slots_text = self._s(slot_expand_out.get("text", "") if isinstance(slot_expand_out, dict) else slot_expand_out)
+            # Relaxed regex for slot parsing
+            slot_pattern = r"SLOT\s*1\s*:\s*(.+?)\s*SLOT\s*2\s*:\s*(.+?)\s*SLOT\s*3\s*:\s*(.+?)\s*SLOT\s*4\s*:\s*(.+)"
+            m = re.search(slot_pattern, expanded_slots_text, re.DOTALL)
+            if m:
+                slot_parse_success = True
+                slot1_raw, slot2_raw, slot3_raw, slot4_raw = [s.strip() for s in m.groups()]
+                break
+        if not slot_parse_success:
+            slot1_raw = slot2_raw = slot3_raw = slot4_raw = ""
 
-            out_text = out.get("text", "") if isinstance(out, dict) else str(out)
-            out_text = self._s(out_text)
-
-            # --- normalize nested TITLE/BODY inside BODY ---
-            if "TITLE:" in out_text and "BODY:" in out_text:
-                try:
-                    _t, _b = out_text.split("BODY:", 1)
-                    out_text = _b.strip()
-                except Exception:
-                    pass
-
-            # Guard: If LLM returned empty, skip to next attempt
-            if not out_text:
-                last_errs = ["llm_empty_output"]
-                continue
-
-            title = "혜택 안내"
-            body = out_text
-
-            if "TITLE:" in out_text and "BODY:" in out_text:
-                t_part, b_part = out_text.split("BODY:", 1)
-                title = t_part.replace("TITLE:", "").strip()
-                body = b_part.strip()
-
-            # Normalize body to 4 paragraphs (hard)
-            lines = self._split_4_paragraphs(body)
-            # remove banned/avoid at line level
-            for i in range(4):
-                for bw in banned_words:
-                    if bw and bw in lines[i]:
-                        lines[i] = lines[i].replace(bw, "")
-                for aw in avoid_words:
-                    if aw and aw in lines[i]:
-                        lines[i] = lines[i].replace(aw, "")
-                if self._contains_banned(lines[i]):
-                    for p in self.meta_ban_phrases:
-                        if p:
-                            lines[i] = lines[i].replace(p, "")
-                    for rx in self.meta_ban_regex:
-                        import re
-                        lines[i] = re.sub(rx, "", lines[i])
-                lines[i] = " ".join(lines[i].split()).strip()
-
-            body = "\n".join(lines).strip()
-
-            # Ensure must-includes (brand/product/must keywords) without breaking style
-            joined = " ".join(lines)
-            if brand_name and brand_name not in joined:
-                lines[1] = f"{brand_name} {lines[1]}".strip()
-            if product_name and product_name not in joined:
-                lines[1] = f"{product_name} {lines[1]}".strip()
-            if brand_must_include:
-                missing = [w for w in brand_must_include if self._s(w) and self._s(w) not in " ".join(lines)]
-                if missing:
-                    addon = " ".join([self._s(w) for w in missing if self._s(w)])
-                    lines[3] = (lines[3].rstrip() + " " + addon).strip()
-
-            body = "\n".join([self._s(x) for x in lines]).strip()
-
-            # Enforce final length 300~350 deterministically
-            body = self._ensure_len_300_350(body)
-
-            # Title enforcement (25~40, emoji both sides)
-            title = self._ensure_title_25_40_with_emojis(title, brand_name, product_name, skin_concern, lifestyle)
-
-            # Final hard ban check (whole body)
-            if self._contains_banned(body):
-                last_errs = ["banned_phrase_detected"]
-                last_title, last_body = title, body
-                continue
-
-            errs = self._validate_generated(title, body, brand_name, product_name)
-            if not errs:
-                return f"TITLE:\n{title}\nBODY:\n{body}"
-
-            # --- LLM self-feedback loop ---
-            feedback_prompt = (
-                "아래는 네가 방금 작성한 마케팅 메시지다.\n"
-                "이 메시지가 제약을 완전히 만족하지 못한 이유가 무엇인지 스스로 점검하고,\n"
-                "문제점만 간단히 정리한 뒤 그 내용을 반영해 다시 작성하라.\n\n"
-                "[문제 목록]\n- " + "\n- ".join(errs) +
-                "\n\n[현재 메시지]\n"
-                f"TITLE:\n{title}\nBODY:\n{body}\n"
-            )
-
-            feedback_messages = [
+        # Step 2b) Summarize each slot
+        slots = []
+        for idx, slot_raw in enumerate([slot1_raw, slot2_raw, slot3_raw, slot4_raw], 1):
+            slot_sum_prompt = self._build_user_prompt_slot_summarize(slot_raw, idx)
+            slot_sum_messages = [
                 {"role": "system", "content": system_p},
-                {"role": "user", "content": feedback_prompt},
+                {"role": "user", "content": slot_sum_prompt},
             ]
+            slot_sum_out = self.llm.generate(messages=slot_sum_messages)
+            slot_sum_text = self._s(slot_sum_out.get("text", "") if isinstance(slot_sum_out, dict) else slot_sum_out)
+            slots.append(slot_sum_text)
 
-            fb_out = self.llm.generate(messages=feedback_messages)
-            fb_text = fb_out.get("text", "") if isinstance(fb_out, dict) else str(fb_out)
-            fb_text = self._s(fb_text)
+        # ------------------------------
+        # slot validation 완화 관련 주석
+        # slot2는 의미군 키워드 기준으로 완화 검증
+        # slot3는 루틴 의미 키워드 기준 완화
+        # ------------------------------
+        # Validate: If any summarized slot is empty or <20 chars, discard that slot
+        for i in range(len(slots)):
+            if not slots[i] or len(slots[i].strip()) < 20:
+                slots[i] = ""
 
-            if fb_text:
-                free_text = fb_text
-            last_errs = errs
-            last_title, last_body = title, body
+        # brand_must_include slot mapping
+        slot2_map = [w for w in brand_must_include if "제품" in w or "사용감" in w or "감촉" in w]
+        slot3_map = [w for w in brand_must_include if "루틴" in w or "위치" in w or "단계" in w]
+        slot4_map = [w for w in brand_must_include if "지속" in w or "구매" in w or "텀" in w or "혜택" in w]
+        # Enforce keywords in slots
+        if slot2_map:
+            if not any(k in slots[1] for k in slot2_map):
+                slots[1] = (slots[1] + " " + slot2_map[0]).strip()
+        if slot3_map:
+            if not any(k in slots[2] for k in slot3_map):
+                slots[2] = (slots[2] + " " + slot3_map[0]).strip()
+        if slot4_map:
+            if not any(k in slots[3] for k in slot4_map):
+                slots[3] = (slots[3] + " " + slot4_map[0]).strip()
 
-        # fallback (still enforce lengths)
-        fb_title = self._ensure_title_25_40_with_emojis(last_title or "피부 루틴 안내", brand_name, product_name, skin_concern, lifestyle)
-        fb_body = self._ensure_len_300_350(last_body or f"{lifestyle}\n{brand_name} {product_name}\n부담 없이 얇게 펴 발라 마무리해요\n필요한 타이밍에 가볍게 챙겨두면 좋아요")
-        fb_lines = self._split_4_paragraphs(fb_body)
-        fb_body = "\n".join(fb_lines).strip()
-        fb_body = self._ensure_len_300_350(fb_body)
+        # pad_pool rule change: Only if total BODY length < 300, append one pad sentence to slot4
+        body_text = "\n".join(slots)
+        if len(body_text) < 300 and pad_pool:
+            pad_sentence = pad_pool[0]
+            slots[3] = (slots[3].rstrip() + " " + pad_sentence).strip()
+            body_text = "\n".join(slots)
 
-        return f"TITLE:\n{fb_title}\nBODY:\n{fb_body}"
+        # After assembling, if length > 350, remove slot4 and recompute
+        if len(body_text) > 350:
+            slots[3] = ""
+            body_text = "\n".join(slots)
+        # If still > 350, return empty string
+        if len(body_text) > 350:
+            return ""
+
+        # TITLE generation
+        slots_text_for_title = "\n".join([f"SLOT{i+1}: {slots[i]}" for i in range(4)])
+        title_prompt = self._build_user_prompt_title_from_slots(slots_text_for_title)
+        title_messages = [
+            {"role": "system", "content": system_p},
+            {"role": "user", "content": title_prompt},
+        ]
+        title_out = self.llm.generate(messages=title_messages)
+        title_text = self._s(title_out.get("text", "") if isinstance(title_out, dict) else title_out)
+        # Enforce length + emoji for title
+        title_text = self._ensure_title_25_40_with_emojis(title_text, brand_name, product_name, skin_concern, lifestyle)
+
+        # Final assembly (hard format)
+        return f"TITLE:\n{title_text}\nBODY:\n{slots[0]}\n{slots[1]}\n{slots[2]}\n{slots[3]}"
     def _has_emoji(self, s: str) -> bool:
         import re
         if not s:

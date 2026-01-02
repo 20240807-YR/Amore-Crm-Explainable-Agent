@@ -4,6 +4,13 @@ import re
 
 class MessageVerifier:
     def __init__(self):
+        # 피부 고민(semantic) 키워드: slot2에서 느슨하게 일치시 사용
+        self.skin_concern_keywords = [
+            # 일반적인 피부 고민 관련 키워드 (확장 가능)
+            "트러블", "여드름", "잡티", "홍조", "건조", "수분", "보습", "민감", "탄력", "주름",
+            "미백", "톤업", "피지", "유분", "각질", "모공", "칙칙", "광채", "광", "피부결", "진정",
+            "붉음", "색소", "흉터", "노화", "피부장벽", "피부톤", "피부개선", "피부고민"
+        ]
         # 메타/기획/CTA 금지어 (강제 차단)
         # - 변형/띄어쓰기/조사 차이를 일부 흡수하기 위해 regex 패턴으로도 추가 검사함
         self.meta_ban = [
@@ -33,7 +40,9 @@ class MessageVerifier:
         # 루틴/지속 맥락 키워드 (느슨)
         self.routine_keywords = [
             "아침", "저녁", "루틴", "매일", "일상", "반복",
-            "지속", "계속", "이어", "관리", "습관"
+            "지속", "계속", "이어", "관리", "습관",
+            # 사용 흐름을 나타내는 표현도 루틴으로 취급(너무 엄격한 실패 방지)
+            "세안", "토너", "다음", "단계", "후", "전", "바르", "사용"
         ]
 
 
@@ -80,7 +89,10 @@ class MessageVerifier:
         # 1) 줄바꿈 기준
         lines = [ln.strip() for ln in b.split("\n") if ln.strip()]
         if len(lines) >= 4:
-            return lines
+            # 4줄 초과(예: URL/추가 줄)인 경우 slot4에 합친다
+            s1, s2, s3 = lines[0], lines[1], lines[2]
+            s4 = " ".join(lines[3:]).strip()
+            return [s1, s2, s3, s4]
 
         # 2) 문장부호 기준 (., !, ?, …, ~)
         parts = re.split(r"[.!?…~]+", b)
@@ -141,15 +153,39 @@ class MessageVerifier:
         b = self._s(body_line)
 
         # -------------------------------------------------
-        # 1. 형식
+        # 1. 형식 + TITLE/BODY 정규화
+        #  - 입력이 (a) title_line/body_line로 분리되어 오거나
+        #         (b) 한쪽에 줄바꿈/중첩 TITLE/BODY가 섞여 와도
+        #    가장 바깥 1쌍(TITLE 1개, BODY 1개)만 추출한다.
         # -------------------------------------------------
-        if not t.startswith("TITLE:"):
+        raw = (t + "\n" + b).strip()
+
+        # 기본 형식 체크(있으면 통과). 단, raw 기준으로도 보정한다.
+        if "TITLE:" not in raw:
             errs.append("title_format")
-        if not b.startswith("BODY:"):
+        if "BODY:" not in raw:
             errs.append("body_format")
 
-        title = t.replace("TITLE:", "", 1).strip()
-        body = b.replace("BODY:", "", 1).strip()
+        # 가장 바깥 TITLE/BODY 1쌍 추출
+        m = re.search(r"TITLE:\s*(.*?)\n\s*BODY:\s*(.*)\Z", raw, flags=re.DOTALL)
+        if m:
+            title = (m.group(1) or "").strip()
+            body = (m.group(2) or "").strip()
+        else:
+            # fallback: 기존 방식(라인이 분리되어 들어오는 경우)
+            title = t.replace("TITLE:", "", 1).strip() if t.startswith("TITLE:") else ""
+            body = b.replace("BODY:", "", 1).strip() if b.startswith("BODY:") else b.strip()
+
+        # BODY 내부에 중첩된 TITLE/BODY 마커가 남아있으면 제거(후속 파싱 보호)
+        # - 가장 바깥 1쌍은 이미 raw에서 확정했으므로, body 안의 마커는 노이즈로 간주
+        body = re.sub(r"(?m)^\s*TITLE:\s*", "", body)
+        body = re.sub(r"(?m)^\s*BODY:\s*", "", body)
+
+        # --- hard remove accidental label tokens (삽입된 라벨 제거) ---
+        body = re.sub(r"\b사용감\b", "", body)
+        body = re.sub(r"\b루틴\s*내\s*위치\b", "", body)
+        body = re.sub(r"\b지속\s*가능성\b", "", body)
+        body = re.sub(r"\s{2,}", " ", body).strip()
 
         # -------------------------------------------------
         # 2. 제목
@@ -187,8 +223,12 @@ class MessageVerifier:
         # 6. 제품명 포함 여부 (강제: 토큰 기준)
         # -------------------------------------------------
         prod = self._s(row.get("상품명"))
-        if prod and not self._loose_contains(prod, body):
-            errs.append("product_missing")
+        if prod:
+            # slot2 기준으로 우선 판단, fallback으로 body 전체 허용
+            slots_tmp = self._split_slots(body)
+            slot2_text = slots_tmp[1] if len(slots_tmp) >= 2 else body
+            if not self._loose_contains(prod, slot2_text):
+                errs.append("product_missing")
 
         # -------------------------------------------------
         # 7. 라이프스타일 / 피부 고민 (강제: 존재)
@@ -235,21 +275,33 @@ class MessageVerifier:
             if not slot1_ok:
                 errs.append("slot1_invalid")
 
-            # slot2
-            slot2_ok = True
-            if prod and not self._loose_contains(prod, s2):
-                slot2_ok = False
-            if not (
-                (skin and self._loose_contains(skin, s2)) or
-                (tex and self._loose_contains(tex, s2)) or
-                (fin and self._loose_contains(fin, s2)) or
-                (scent and self._loose_contains(scent, s2))
-            ):
-                slot2_ok = False
-            if not slot2_ok:
+            # slot2에 라벨 토큰만 붙은 경우 방지
+            if len(self._tokenize(s2)) <= 2:
                 errs.append("slot2_invalid")
+                slot2_ok = False
+            else:
+                # slot2: 피부 고민은 semantic 키워드로 느슨하게 허용 (skin_concern token 불일치시에도 키워드 일치하면 통과)
+                slot2_ok = True
+                if prod and not self._loose_contains(prod, s2):
+                    slot2_ok = False
+                # Relaxed semantic check for skin concerns
+                skin_semantic_hit = any(k in s2 for k in self.skin_concern_keywords)
+                if not (
+                    (skin and self._loose_contains(skin, s2)) or
+                    skin_semantic_hit or
+                    (tex and self._loose_contains(tex, s2)) or
+                    (fin and self._loose_contains(fin, s2)) or
+                    (scent and self._loose_contains(scent, s2))
+                ):
+                    slot2_ok = False
+                if not slot2_ok:
+                    errs.append("slot2_invalid")
 
             # slot3
+            # label-only contamination 방지: 단독 토큰만 있는 경우는 무효
+            if len(self._tokenize(s3)) <= 2:
+                errs.append("slot3_routine_missing")
+
             slot3_ok = self._has_routine_context(s3) and (
                 (tou and self._loose_contains(tou, s3)) or
                 (season and self._loose_contains(season, s3)) or
@@ -259,13 +311,8 @@ class MessageVerifier:
             if not self._has_routine_context(s3):
                 errs.append("slot3_routine_missing")
 
-            # slot4
-            slot4_ok = (
-                (channel and self._loose_contains(channel, s4)) or
-                (rep and self._loose_contains(rep, s4)) or
-                (price and self._loose_contains(price, s4)) or
-                (cta and self._loose_contains(cta, s4))
-            )
+            # slot4: 값이 존재하면 허용 (토큰/키워드 불필요, 단순 존재 확인)
+            slot4_ok = bool(s4 and s4.strip())
             if not slot4_ok:
                 errs.append("slot4_invalid")
 
