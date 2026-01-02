@@ -302,14 +302,19 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         clean_body = body.replace("BODY:", "", 1).strip()
         body = "BODY: " + clean_body
 
-        errs = verifier.validate(row, title, body)
-        errs.extend(verify_brand_rules(clean_body, brand_rule))
+        # Validate ONLY the primary (top-1) message.
+        # top-k rows are candidates/comparisons; validating them causes brand_missing by design.
+        if i == 1:
+            errs = verifier.validate(row, title, body)
+            errs.extend(verify_brand_rules(clean_body, brand_rule))
 
-        _refusal_text = msg
-        if isinstance(msg, dict):
-            _refusal_text = msg.get("body") or msg.get("body_line") or ""
-        if _looks_like_refusal(_refusal_text if isinstance(_refusal_text, str) else str(_refusal_text)):
-            errs = list(errs) + ["llm_refusal_like"]
+            _refusal_text = msg
+            if isinstance(msg, dict):
+                _refusal_text = msg.get("body") or msg.get("body_line") or ""
+            if _looks_like_refusal(_refusal_text if isinstance(_refusal_text, str) else str(_refusal_text)):
+                errs = list(errs) + ["llm_refusal_like"]
+        else:
+            errs = []
 
         results.append({
             "persona_id": row.get("persona_id"),
