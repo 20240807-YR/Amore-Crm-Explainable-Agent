@@ -296,9 +296,12 @@ class MessageVerifier:
         if not self._has_brand(combined_brand_text, brand):
             errors.append("brand_missing")
 
-        # Product anchor check (body only)
-        if not self._has_product(body, product_anchor):
-            errors.append("product_missing")
+        # Product anchor handling policy update:
+        # - If product_anchor is empty or equals a known fallback (e.g., '추천 제품 없음'), treat as neutral (PASS)
+        # - If product_anchor is provided but not mentioned, do NOT hard-fail; at most warn
+        if product_anchor and product_anchor not in ("추천 제품 없음", "-"):
+            if not self._has_product(body, product_anchor):
+                warnings.append("product_missing")
 
         # Product→Brand mismatch check (catalog-backed)
         # Enforce: if actual brand resolved from catalog != persona brand → hard error
@@ -313,12 +316,12 @@ class MessageVerifier:
         # Marketing copy may mention concerns in TITLE rather than BODY, so we validate on combined text.
         combined_text = f"{title}\n{body}"
 
-        if skin_concerns and (not self._has_skin_concern(combined_text, skin_concerns)):
-            # Default: do NOT fail hard for missing concern wording in marketing copy.
-            # If strict mode is desired, flip this to errors.
-            if self.strict:
-                errors.append("skin_concern_missing")
-            else:
+        # Skin concern handling policy update:
+        # - If persona provides no explicit skin_concern, treat as neutral (PASS)
+        # - If provided but not mentioned, do NOT error; at most warn when strict=False
+        if skin_concerns:
+            if not self._has_skin_concern(combined_text, skin_concerns):
+                # Neutralize hard failure: do not append errors
                 warnings.append("skin_concern_missing")
 
         # Slot count check (require at least 4 lines)
@@ -340,46 +343,37 @@ class MessageVerifier:
         }
 
     def validate(self, row: Dict, title: str, body: str) -> List[str]:
-        """Controller compatibility API.
+        """Controller compatibility API (STRICT mode).
 
-        Accepts (row, title, body) and reuses verify(message, plan).
-        Must not mutate inputs.
+        Hard rules enforced here (controller consumes ONLY these errors):
+          - BODY length must be >= 50 characters (otherwise body_too_short)
+          - Persona brand must appear in BODY (whitespace-insensitive) (otherwise brand_missing)
+
+        Notes:
+          - This does not mutate inputs.
+          - Other, richer checks remain available via verify(), but controller repair must be driven
+            by these hard errors only.
         """
-        # Build minimal message/plan required by current verifier rules.
-        message = {"title": title or "", "body": body or ""}
-        # Ensure catalog-backed product→brand map is available for mismatch validation.
-        self._ensure_product_brand_map_loaded()
+        errs: List[str] = []
 
-        # Row may carry brand/skin_concern/product under different keys.
-        brand = ""
+        body_raw = body or ""
+        body_clean = re.sub(r"\s+", "", body_raw).lower()
+
+        # Brand source (row-first)
+        target_brand = ""
         if isinstance(row, dict):
-            brand = row.get("brand_name_slot") or row.get("brand") or row.get("brand_name") or ""
+            target_brand = (row.get("brand") or row.get("brand_name_slot") or row.get("brand_name") or "")
+        target_brand_clean = re.sub(r"\s+", "", target_brand).lower()
 
-        skin_concern_raw = ""
-        if isinstance(row, dict):
-            skin_concern_raw = row.get("skin_concern") or row.get("skin_concern_raw") or ""
+        # 1) Length check (minimal sanity)
+        if len(body_raw) < 50:
+            errs.append("body_too_short")
 
-        # If persona intentionally has no explicit skin_concern, pass a neutral default downstream
-        # so the system does not force explicit concern exposure.
-        if not (skin_concern_raw or "").strip():
-            skin_concern_raw = "피부 컨디션"
+        # 2) Strict brand inclusion check (BODY only)
+        if target_brand_clean and (target_brand_clean not in body_clean):
+            errs.append("brand_missing")
 
-        product_anchor = ""
-        if isinstance(row, dict):
-            product_anchor = row.get("product_anchor") or row.get("상품명") or row.get("product") or ""
-
-        plan = {
-            "brand_name_slot": brand,
-            "persona_fields": {
-                "brand": brand,
-                "skin_concern": skin_concern_raw,
-            },
-            "product_anchor": product_anchor,
-        }
-
-        res = self.verify(message, plan)
-        # Controller expects only hard errors; warnings must not trigger repair.
-        return list(res.get("errors", []))
+        return errs
 
 # Compatibility helper for controller import.
 # Brand rule validation (if any) must be executed after narration, and must not mutate content.

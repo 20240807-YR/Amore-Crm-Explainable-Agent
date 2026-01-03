@@ -1,9 +1,54 @@
+# -------------------------------------------------
+# Persona-level brand rule filtering (post brand-sample)
+# -------------------------------------------------
+def _apply_persona_brand_rules(persona_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Persona-level brand filtering / deprioritization.
+    This function must NOT invent brands.
+    It only filters or reorders existing rows.
+    """
+    if not rows:
+        return rows
+
+    # Persona-specific hard rules (minimal, explicit)
+    EXCLUDE_BRANDS_BY_PERSONA = {
+        "persona_6": ["설화수", "헤라"],          # 가성비 → 초고가 제외
+        "persona_2": ["헤라"],                    # 민감 → 향 중심 브랜드 제외
+        "persona_8": ["설화수"],                  # 남성 간편 → 프리미엄 스킵
+    }
+
+    DEPRIORITIZE_BRANDS_BY_PERSONA = {
+        "persona_4": ["설화수"],                  # 트러블 → 고영양 후순위
+    }
+
+    pid = str(persona_id)
+
+    # 1) hard exclude
+    banned = set(EXCLUDE_BRANDS_BY_PERSONA.get(pid, []))
+    if banned:
+        rows = [r for r in rows if str(r.get("brand")) not in banned]
+
+    if not rows:
+        return rows
+
+    # 2) soft deprioritize (stable sort)
+    deprioritized = set(DEPRIORITIZE_BRANDS_BY_PERSONA.get(pid, []))
+
+    def _rank(r):
+        b = str(r.get("brand"))
+        return (1 if b in deprioritized else 0)
+
+    rows = sorted(rows, key=_rank)
+    return rows
 import os
 import time
 import sys
 import csv
 import re
 from pathlib import Path
+import pandas as pd
+import numpy as np
+from typing import Any, Dict, List
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent
@@ -354,15 +399,127 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
     loader = CRMLoader()
     tones = ToneProfiles(DATA_DIR)
     verifier = MessageVerifier()
+    # --- FIX: explicit product dataframe injection ---
+    product_df = None
+    try:
+        if PRODUCT_CSV_PATH.exists():
+            print(f"[controller] Loading product CSV: {PRODUCT_CSV_PATH}")
+            product_df = pd.read_csv(PRODUCT_CSV_PATH)
+            print(f"[controller] Product CSV loaded rows={len(product_df)}")
+        else:
+            print(f"[controller] WARN: product CSV not found: {PRODUCT_CSV_PATH}")
+    except Exception as e:
+        print(f"[controller] WARN: failed to load product CSV: {e}")
+        product_df = None
+
     selector = ProductSelector(
-        df=None,
+        df=product_df,
         name_col="상품명",
         brand_col="brand",
     )
+    # --- END FIX ---
     market = MarketContextTool(enabled=use_market_context)
 
     # 2) load rows
     rows = loader.load(persona_id, topk) or []
+    # ------------------------------------------------------------------
+    # Brand-level re-sampling (anti-collapse)
+    # - rows returned by CRMLoader are often part-sliced; topk becomes "row topk".
+    # - We convert to "brand topk" by keeping the best row per brand, then sampling.
+    # ------------------------------------------------------------------
+    BRAND_CAP = {
+        # tune later; only prevents a single brand from dominating purely by score
+        "프리메라": 0.32,
+        "메이크온": 0.32,
+    }
+    SOFTMAX_TEMPERATURE = 1.7
+
+    def _brand_key(v: Any) -> str:
+        return str(v).strip().replace("\u200b", "").replace("\ufeff", "").replace(" ", "") if v is not None else ""
+
+    def _get_score(r: Dict[str, Any]) -> float:
+        # prefer explicit score fields if present
+        s = r.get("score")
+        if s is None:
+            s = r.get("final_score")
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
+
+    def _cap_score(brand: str, score: float) -> float:
+        b = _brand_key(brand)
+        cap = BRAND_CAP.get(b)
+        return float(min(score, cap)) if cap is not None else float(score)
+
+    def _softmax_probs(vals: List[float], temperature: float) -> List[float]:
+        if not vals:
+            return []
+        t = float(temperature) if float(temperature) > 0 else 1.0
+        x = np.array([float(v) for v in vals], dtype=np.float64) / t
+        x = x - np.max(x)
+        ex = np.exp(x)
+        s = float(np.sum(ex))
+        if s <= 0.0 or not np.isfinite(s):
+            return [1.0 / len(vals)] * len(vals)
+        return [float(p) for p in (ex / s).tolist()]
+
+    if isinstance(rows, list) and rows:
+        # 1) group by brand, keep only the top-scoring row per brand
+        brand_best: Dict[str, Dict[str, Any]] = {}
+        brand_best_score: Dict[str, float] = {}
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            b_raw = r.get("brand", "")
+            b = _brand_key(b_raw)
+            sc = _get_score(r)
+            if (b not in brand_best_score) or (sc > brand_best_score[b]):
+                brand_best[b] = r
+                brand_best_score[b] = sc
+
+        brands = list(brand_best.keys())
+        if brands:
+            # 2) cap + softmax sampling over brand representative scores
+            capped_scores = [_cap_score(br, brand_best_score.get(br, 0.0)) for br in brands]
+            probs = _softmax_probs(capped_scores, SOFTMAX_TEMPERATURE)
+
+            k = int(topk) if isinstance(topk, int) and topk > 0 else 3
+            k = min(k, len(brands))
+
+            # sample without replacement
+            chosen_idxs: List[int] = []
+            available = list(range(len(brands)))
+            p = np.array(probs, dtype=np.float64)
+
+            for _ in range(k):
+                if len(available) == 1:
+                    chosen_idxs.append(available[0])
+                    break
+                p_rem = p[available]
+                s_rem = float(np.sum(p_rem))
+                if s_rem <= 0.0 or not np.isfinite(s_rem):
+                    idx = int(np.random.choice(available))
+                else:
+                    p_rem = p_rem / s_rem
+                    idx = int(np.random.choice(available, p=p_rem))
+                chosen_idxs.append(idx)
+                available.remove(idx)
+
+            chosen_brands = [brands[i] for i in chosen_idxs]
+            rows = [brand_best[b] for b in chosen_brands]
+
+            if verbose:
+                dbg = [(brand_best[b].get("brand"), _get_score(brand_best[b])) for b in chosen_brands]
+                print(f"[controller] brand-resample -> {dbg}")
+    # -------------------------------------------------
+    # Persona-level brand rule filtering (post brand-sample)
+    # -------------------------------------------------
+    rows = _apply_persona_brand_rules(persona_id, rows)
+
+    if verbose:
+        print("[controller] persona-brand-filter ->", [(r.get("brand"), r.get("score")) for r in rows])
+    # ------------------------------------------------------------------
     tone_map = tones.load_tone_profile_map()
 
     # ✅ 입력 결손 보정은 "여기서" 고정 (planner/narrator/verifier 공통 입력)
@@ -419,8 +576,18 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         product_err = None
         product_name = ""
         try:
-            product = selector.select_one(row=row) or {}
-            product_name = _s(product.get("상품명"))
+            # Compatibility: controller prefers selector.select_one(row) -> dict with "상품명"
+            # Some local debug versions may expose select_product(row, topk) -> (name, score)
+            if hasattr(selector, "select_one"):
+                product = selector.select_one(row=row) or {}
+                product_name = _s(product.get("상품명"))
+            elif hasattr(selector, "select_product"):
+                chosen_name, chosen_score = selector.select_product(row=row, topk=topk)
+                product_name = _s(chosen_name)
+                # Keep a dict-like product for downstream if needed
+                product = {"상품명": product_name, "_score": float(chosen_score)}
+            else:
+                raise AttributeError("ProductSelector must expose select_one(row) or select_product(row, topk)")
         except Exception as e:
             product_err = f"product_selector_failed: {e}"
             product_name = ""

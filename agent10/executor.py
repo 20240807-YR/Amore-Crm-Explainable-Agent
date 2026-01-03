@@ -72,12 +72,31 @@ class Executor:
             if self.verbose:
                 print(f"[executor] row {i}/{len(rows)} select product")
 
-            product = self.product_selector.select_one(
-                brand=brand,
-                skin_concern=str(row.get("skin_concern", "")).strip(),
-                ingredient_avoid_list=str(row.get("ingredient_avoid_list", "")).strip(),
-            )
-            row.update(product)
+            # ProductSelector compatibility:
+            # - Legacy: select_one(brand=..., skin_concern=..., ingredient_avoid_list=...) -> dict
+            # - Row-based: select_one(row=row) -> dict with "상품명"
+            # - Debug: select_product(row=row, topk=topk) -> (name, score)
+            product = {}
+            try:
+                if hasattr(self.product_selector, "select_one"):
+                    try:
+                        product = self.product_selector.select_one(
+                            brand=brand,
+                            skin_concern=str(row.get("skin_concern", "")).strip(),
+                            ingredient_avoid_list=str(row.get("ingredient_avoid_list", "")).strip(),
+                        )
+                    except TypeError:
+                        # Signature mismatch; fall back to row-based contract
+                        product = self.product_selector.select_one(row=row)
+                elif hasattr(self.product_selector, "select_product"):
+                    chosen_name, chosen_score = self.product_selector.select_product(row=row, topk=topk)
+                    product = {"상품명": str(chosen_name).strip(), "_score": float(chosen_score)}
+                else:
+                    raise AttributeError("ProductSelector must expose select_one(...) or select_product(row, topk)")
+            except Exception as e:
+                raise RuntimeError(f"[executor] product_selector_failed: {e}")
+
+            row.update(product or {})
 
             if self.use_market_context:
                 row["market_context"] = self.market_tool.fetch(brand=brand)

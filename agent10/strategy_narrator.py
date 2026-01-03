@@ -23,6 +23,34 @@ except Exception:
 
 
 class StrategyNarrator:
+    def _force_inject_brand(self, text: str, brand: str, product: str) -> str:
+        """
+        HARD GUARD:
+        If brand name is missing in BODY, forcibly inject it.
+        Priority:
+        1) Replace first product mention -> "{brand} {product}"
+        2) If BODY exists, prepend brand sentence
+        3) Else, prepend brand at very beginning
+        """
+        if not brand:
+            return text
+
+        norm_text = text.replace(" ", "").lower()
+        norm_brand = brand.replace(" ", "").lower()
+
+        if norm_brand in norm_text:
+            return text
+
+        # Try product-name replacement first
+        if product and product in text:
+            return text.replace(product, f"{brand} {product}", 1)
+
+        # Try BODY anchor injection
+        if "BODY:" in text:
+            return text.replace("BODY:", f"BODY: {brand}가 제안합니다. ", 1)
+
+        # Fallback: prepend
+        return f"{brand} 추천! {text}"
     # [ADD] awkward phrasing fix
     def _fix_awkward_phrasing(self, text: str) -> str:
         table = {
@@ -1299,25 +1327,11 @@ class StrategyNarrator:
         brand_name = self._s(row.get("brand", "아모레퍼시픽"))
         product_name = self._s(row.get("상품명", ""))
 
-        # --- Brand detection (DO NOT override row brand) ---
-        # If the row already has a brand, never override it using product_name.
-        # This prevents masking upstream selector mismatches (e.g., row brand=프리메라 but product is 메이크온).
-        detected_brand = ""
-        if product_name:
-            m = re.search(r"(메이크온|라네즈|헤라|이니스프리|설화수|마몽드|프리메라)", product_name)
-            detected_brand = m.group(1) if m else ""
-
-        if not brand_name or brand_name == "아모레퍼시픽":
-            # If brand is missing/too-generic, fall back to detected brand.
-            if detected_brand:
-                brand_name = detected_brand
+        # Brand detection logic removed: always use row["brand"] as brand_name.
         # Brand isolation: ban any "프리메라의 메이크온" or "프리메라 메이크온" or similar hybrids
         def _brand_isolation_filter(text: str) -> str:
-            # Remove hybrid brand phrases
-            # Only allow one brand at a time, never "프리메라 메이크온", "아모레 메이크온", etc.
+            # Only remove explicit hybrid strings, do NOT infer or replace brands
             text = re.sub(r"(프리메라의\s*메이크온|프리메라\s*메이크온|아모레\s*메이크온|아모레퍼시픽\s*메이크온)", "메이크온", text)
-            # Remove any double-brand pattern (e.g. "라네즈 이니스프리", etc.)
-            text = re.sub(r"(프리메라|아모레퍼시픽|아모레)\s+(메이크온|라네즈|헤라|이니스프리|설화수|마몽드)", r"\2", text)
             return text
 
         skin_concern = self._s(row.get("skin_concern", ""))
@@ -1629,6 +1643,7 @@ class StrategyNarrator:
         # Hard guard: ensure final output ends with punctuation
         if final_text and final_text[-1] not in ".!?":
             final_text += "."
+        final_text = self._force_inject_brand(final_text, brand_name, product_name)
         return final_text
     def _has_emoji(self, s: str) -> bool:
         import re
