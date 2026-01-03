@@ -1299,13 +1299,18 @@ class StrategyNarrator:
         brand_name = self._s(row.get("brand", "아모레퍼시픽"))
         product_name = self._s(row.get("상품명", ""))
 
-        # --- Brand de-duplication / anti-hybrid rule ---
-        # Only allow pure sub-brand, and ban any hybrid or mixed text
-        brand_tokens = []
+        # --- Brand detection (DO NOT override row brand) ---
+        # If the row already has a brand, never override it using product_name.
+        # This prevents masking upstream selector mismatches (e.g., row brand=프리메라 but product is 메이크온).
+        detected_brand = ""
         if product_name:
-            brand_tokens = re.findall(r"(메이크온|라네즈|헤라|이니스프리|설화수|마몽드)", product_name)
-        if brand_tokens:
-            brand_name = brand_tokens[0]
+            m = re.search(r"(메이크온|라네즈|헤라|이니스프리|설화수|마몽드|프리메라)", product_name)
+            detected_brand = m.group(1) if m else ""
+
+        if not brand_name or brand_name == "아모레퍼시픽":
+            # If brand is missing/too-generic, fall back to detected brand.
+            if detected_brand:
+                brand_name = detected_brand
         # Brand isolation: ban any "프리메라의 메이크온" or "프리메라 메이크온" or similar hybrids
         def _brand_isolation_filter(text: str) -> str:
             # Remove hybrid brand phrases
