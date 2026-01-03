@@ -1,9 +1,10 @@
-# agent10/run_agent10_test.py
 import os
 import sys
 import time
 import threading
 from pathlib import Path
+import random
+import pandas as pd
 
 START = time.time()
 
@@ -113,6 +114,19 @@ from controller import main  # noqa: E402
 
 log("controller.main ready")
 
+# -------------------------------------------------
+# Persona 랜덤 선택 (실험 조건 레이어)
+# -------------------------------------------------
+persona_csv = DATA_DIR_ABS / "persona_meta_v2.csv"
+df_persona = pd.read_csv(persona_csv)
+
+persona_ids = df_persona["persona_id"].dropna().unique().tolist()
+if not persona_ids:
+    raise RuntimeError("persona_meta_v2.csv에 persona_id가 없습니다.")
+
+persona_id = random.choice(persona_ids)
+log(f"SELECTED persona_id (RANDOM): {persona_id}")
+
 spinner_thread = threading.Thread(
     target=_spinner,
     args=("CONTROLLER(main) RUNNING",),
@@ -124,9 +138,9 @@ results = None
 err = None
 
 try:
-    log("CALL main(persona_id=persona_1, topk=3, use_market_context=False, verbose=True)")
+    log("CALL main(persona_id=persona_id, topk=3, use_market_context=False, verbose=True)")
     results = main(
-        persona_id="persona_1",
+        persona_id=persona_id,
         topk=3,
         use_market_context=False,
         verbose=True,

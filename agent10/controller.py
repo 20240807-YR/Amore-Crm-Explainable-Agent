@@ -354,7 +354,11 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
     loader = CRMLoader()
     tones = ToneProfiles(DATA_DIR)
     verifier = MessageVerifier()
-    selector = ProductSelector()
+    selector = ProductSelector(
+        df=None,
+        name_col="상품명",
+        brand_col="brand",
+    )
     market = MarketContextTool(enabled=use_market_context)
 
     # 2) load rows
@@ -439,7 +443,13 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             continue
 
         row["상품명"] = product_name
-        row["brand_name_slot"] = brand
+        # brand_name_slot 결정: 제품 기준 노출 브랜드 분기
+        product_anchor = row.get("상품명") or row.get("product_anchor", "")
+
+        if product_anchor and "메이크온" in product_anchor:
+            row["brand_name_slot"] = "메이크온"
+        else:
+            row["brand_name_slot"] = brand
         row["market_context"] = market.fetch(brand) if use_market_context else {}
 
         if verbose:
@@ -477,7 +487,19 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         if verbose:
             print(f"[controller] row {i}/{len(rows)} generate")
 
-        msg = narrator.generate(row=row, plan=plan, brand_rule=brand_rule)
+        # --- narration row sanitization (marketing context) ---
+        narr_row = dict(row)
+
+        # Anti-aging / dry-skin persona guardrail
+        skin_concern_raw = str(row.get("skin_concern", ""))
+        if "주름" in skin_concern_raw or "탄력" in skin_concern_raw or "건성" in skin_concern_raw:
+            narr_row["skin_concern"] = "주름,탄력,속건조"
+            # remove acne/oil language from narration context
+            for bad_kw in ["트러블", "피지", "유분", "산뜻"]:
+                narr_row["skin_concern"] = narr_row["skin_concern"].replace(bad_kw, "")
+            narr_row["message_tone_preference"] = "고급/집중케어"
+
+        msg = narrator.generate(row=narr_row, plan=plan, brand_rule=brand_rule)
 
         # StrategyNarrator returns dict; controller legacy expects string
         if isinstance(msg, dict):
@@ -496,8 +518,49 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             product_name=product_name,
             skin_concern=row.get("skin_concern", ""),
         )
+        # (1) body_len>350 literal warning
+        if len(clean_body) > 350:
+            literal_warnings.append("body_len>350")
 
-        body = "BODY: " + clean_body
+        # (2) 옵션 B 컷 로직: verifier 실행 이전, warnings에 body_len>350 있을 때만 동작 (옵션 B)
+        if i == 1 and "body_len>350" in literal_warnings:
+            def _split_sentences_keep_punct(text):
+                # Split on [.!?] but keep delimiter at end of each sentence
+                import re
+                sentence_end = re.compile(r'([^\.\?\!]*[\.\?\!])')
+                matches = sentence_end.findall(text)
+                # If any trailing text without punctuation, add as last sentence
+                rest = sentence_end.sub('', text)
+                if rest.strip():
+                    matches.append(rest)
+                # Remove empty
+                return [m.strip() for m in matches if m.strip()]
+
+            sentences = _split_sentences_keep_punct(clean_body)
+            # 컷 로직은 문장 3개 미만이면 skip
+            if len(sentences) >= 3:
+                cut_applied = False
+                # remove second-to-last sentence
+                cut1 = list(sentences)
+                if len(cut1) >= 2:
+                    del cut1[-2]
+                cut_body1 = ' '.join(cut1).strip()
+                if len(cut1) >= 3:
+                    # remove third-to-last sentence as well
+                    cut2 = list(cut1)
+                    del cut2[-3]
+                    cut_body2 = ' '.join(cut2).strip()
+                    clean_body = cut_body2
+                    cut_applied = True
+                else:
+                    clean_body = cut_body1
+                    cut_applied = True
+                if cut_applied:
+                    body = "BODY: " + clean_body
+            else:
+                body = "BODY: " + clean_body
+        else:
+            body = "BODY: " + clean_body
 
         # Validate ONLY the primary (top-1) message.
         # top-k rows are candidates/comparisons; validating them causes brand_missing by design.
