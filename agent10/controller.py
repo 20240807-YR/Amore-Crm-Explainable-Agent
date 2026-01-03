@@ -73,6 +73,13 @@ from brand_rules import load_brand_rules
 # -------------------------------------------------
 # helpers
 # -------------------------------------------------
+
+# Prevent already-rendered message from being re-input to narrator
+def _is_already_rendered_message(text: Any) -> bool:
+    if not isinstance(text, str):
+        return False
+    t = text.strip()
+    return t.startswith("TITLE:") and "BODY:" in t
 DEFAULT_SKIN_CONCERN = "건조와 유수분 밸런스"
 DEFAULT_LIFESTYLE = "일상적인 실내 생활"
 
@@ -187,6 +194,66 @@ def _parse_title_body(msg: str):
         return title, body
 
     return "TITLE: 제목 없음", "BODY: " + s
+
+
+# --- New helper: normalize narrator dict output into (title_line, body_line) ---
+from typing import Any, Dict
+def _normalize_title_body_from_dict(d: Dict[str, Any]):
+    """Normalize narrator dict output into (title_line, body_line).
+    - Enforces non-empty TITLE content.
+    - Strips accidental 'TITLE:'/'BODY:' prefixes inside values.
+    - Falls back to parsing embedded raw text if present.
+    """
+    if not isinstance(d, dict):
+        return "TITLE: 제목 없음", "BODY:"
+
+    # 1) pull candidates
+    title_raw = d.get("title")
+    if title_raw is None:
+        title_raw = d.get("title_line")
+
+    body_raw = d.get("body")
+    if body_raw is None:
+        body_raw = d.get("body_line")
+
+    # 2) normalize strings
+    t = "" if title_raw is None else str(title_raw).strip()
+    b = "" if body_raw is None else str(body_raw).strip()
+
+    # strip accidental label prefixes inside values
+    if t.upper().startswith("TITLE:"):
+        t = t.split(":", 1)[1].strip()
+    if b.upper().startswith("BODY:"):
+        b = b.split(":", 1)[1].strip()
+
+    # 3) fallback: try to parse any embedded full message string
+    if (not t) or (not b):
+        raw_text = d.get("message")
+        if raw_text is None:
+            raw_text = d.get("text")
+        if raw_text is None:
+            raw_text = d.get("raw")
+        if raw_text is None:
+            raw_text = d.get("output")
+        if isinstance(raw_text, str) and raw_text.strip():
+            pt, pb = _parse_title_body(raw_text)
+            # pb is like 'BODY: ...'
+            pb_clean = pb.replace("BODY:", "", 1).strip()
+            if not t:
+                t2 = pt.replace("TITLE:", "", 1).strip()
+                if t2:
+                    t = t2
+            if not b and pb_clean:
+                b = pb_clean
+
+    # 4) final guards
+    if not t:
+        t = "제목 없음"
+
+    title_line = f"TITLE: {t}" if not str(t).strip().upper().startswith("TITLE:") else str(t).strip()
+    body_line = "BODY: " + (b or "").strip()
+
+    return title_line, body_line
 
 
 def _looks_like_refusal(msg: str) -> bool:
@@ -515,6 +582,25 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
     # -------------------------------------------------
     # Persona-level brand rule filtering (post brand-sample)
     # -------------------------------------------------
+    # -------------------------------------------------
+    # Data integrity safety belt:
+    # Drop brands that have ZERO products in product CSV
+    # -------------------------------------------------
+    if isinstance(rows, list) and rows and product_df is not None:
+        # Build set of brands that actually exist in product_df
+        try:
+            valid_brands = set(
+                str(b).strip()
+                for b in product_df["brand"].dropna().unique().tolist()
+            )
+        except Exception:
+            valid_brands = set()
+
+        if valid_brands:
+            rows = [
+                r for r in rows
+                if str(r.get("brand", "")).strip() in valid_brands
+            ]
     rows = _apply_persona_brand_rules(persona_id, rows)
 
     if verbose:
@@ -548,6 +634,12 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
     results = []
 
     # 3) loop
+    def _is_final_message(text: str) -> bool:
+        if not isinstance(text, str):
+            return False
+        t = text.strip()
+        return t.startswith("TITLE:") and "BODY:" in t
+
     for i, row in enumerate(rows, 1):
         if verbose:
             print(f"[controller] row {i}/{len(rows)} select product")
@@ -666,16 +758,32 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
                 narr_row["skin_concern"] = narr_row["skin_concern"].replace(bad_kw, "")
             narr_row["message_tone_preference"] = "고급/집중케어"
 
+        # [CONTROLLER GUARD] 이미 완성된 메시지가 narrator 입력으로 재유입되는 것을 차단
+        if _is_already_rendered_message(narr_row.get("message")):
+            narr_row["message"] = ""
+        if _is_already_rendered_message(narr_row.get("raw_text")):
+            narr_row["raw_text"] = ""
+
         msg = narrator.generate(row=narr_row, plan=plan, brand_rule=brand_rule)
 
-        # StrategyNarrator returns dict; controller legacy expects string
+        # [CONTROLLER GUARD] narrator 결과가 다시 중첩되지 않도록 보정
+        if isinstance(msg, str) and msg.count("TITLE:") > 1:
+            first = msg.find("TITLE:")
+            second = msg.find("TITLE:", first + 6)
+            if second != -1:
+                msg = msg[:second].strip()
+
+        # StrategyNarrator may return a structured dict.
+        # Controller must enforce a clean (TITLE line, BODY line) contract here.
         if isinstance(msg, dict):
-            title = msg.get("title_line", "TITLE:")
-            body = msg.get("body_line", "BODY:")
+            title, body = _normalize_title_body_from_dict(msg)
         else:
             title, body = _parse_title_body(msg)
 
         clean_body = body.replace("BODY:", "", 1).strip()
+        # If BODY is effectively empty, keep it empty (verifier will catch), but avoid whitespace-only carry.
+        if clean_body and clean_body.strip() == "":
+            clean_body = ""
 
         # Controller must not rewrite body content.
         # Detect only and attach warnings for downstream inspection.

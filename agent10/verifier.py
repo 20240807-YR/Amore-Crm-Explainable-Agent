@@ -267,7 +267,11 @@ class MessageVerifier:
         warnings = []
 
         title = message.get("title", "") or message.get("TITLE", "")
+        # Sanitize leaked formatting labels from narrator/LLM
+        title = re.sub(r"(?im)^\s*(\*\*)?\s*(title|body)\s*:\s*", "", title)
         body = message.get("body", "") or message.get("BODY", "")
+        # Sanitize leaked formatting labels from narrator/LLM
+        body = re.sub(r"(?im)^\s*(\*\*)?\s*(title|body)\s*:\s*", "", body)
 
         brand = plan.get("brand_name_slot") or plan.get("persona_fields", {}).get("brand")
         product_anchor = plan.get("product_anchor")
