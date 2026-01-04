@@ -85,17 +85,20 @@ class OpenAIChatCompletionClient:
         """
 
         # -------------------------------------------------
-        # type guard: OpenAI API requires list[{"role","content"}]
-        # Some upstream code may accidentally pass a string.
-        # We coerce string -> [{"role":"user","content": <string>}]
-        # so the request does not 400, while printing a clear debug line.
+        # Strict type guard: messages must be list of dicts with keys 'role' and 'content'
         # -------------------------------------------------
-        if isinstance(messages, str):
-            print("[OpenAIClient] WARN: messages was str -> coercing to chat list")
-            messages = [{"role": "user", "content": messages}]
-        elif messages is not None and not isinstance(messages, list):
-            print(f"[OpenAIClient] WARN: messages type={type(messages)} -> using dummy response")
-            return self._dummy_response()
+        if not isinstance(messages, list):
+            raise TypeError(
+                "OpenAIChatCompletionClient.chat expects messages as list[{'role','content'}]; "
+                f"got {type(messages)}"
+            )
+
+        for m in messages:
+            if not isinstance(m, dict) or "role" not in m or "content" not in m:
+                raise ValueError(
+                    "Each message must be dict with keys {'role','content'}; "
+                    f"got {m}"
+                )
 
         # 🔥 실제 호출 직전 라우팅 디버그 (판별용 핵심 로그)
         print(
@@ -143,8 +146,11 @@ class OpenAIChatCompletionClient:
     def generate(self, messages=None, system=None, user=None, temperature=0.7):
         # StrategyNarrator may call generate(messages=...)
         if messages is not None:
-            if isinstance(messages, str):
-                print("[OpenAIClient] WARN: generate(messages=...) received str; coercing")
+            if not isinstance(messages, list):
+                raise TypeError(
+                    "OpenAIChatCompletionClient.generate(messages=...) requires messages as list; "
+                    f"got {type(messages)}"
+                )
             return self.chat(messages=messages, temperature=temperature)
 
         # Or generate(system, user) style

@@ -629,7 +629,11 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         r["slot2_hints"] = [rp] if rp else []
 
     planner = ReActReasoningAgent(llm, tone_map)
-    narrator = StrategyNarrator(llm, tone_profile_map=tone_map)
+    narrator = StrategyNarrator(
+        llm=llm,
+        tone_profile_map=tone_map,
+        pad_pool=None,
+    )
 
     results = []
 
@@ -850,10 +854,10 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         # Controller must not rewrite body content.
         # Detect only and attach warnings for downstream inspection.
         literal_warnings = _detect_literal_warnings(
-            clean_body=clean_body,
-            brand=brand,
-            product_name=product_name,
-            skin_concern=row.get("skin_concern", ""),
+            clean_body,
+            brand,
+            product_name,
+            row.get("skin_concern", ""),
         )
         # (1) body_len>350 literal warning
         if len(clean_body) > 350:
