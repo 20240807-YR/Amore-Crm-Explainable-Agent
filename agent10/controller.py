@@ -83,6 +83,224 @@ def _is_already_rendered_message(text: Any) -> bool:
 DEFAULT_SKIN_CONCERN = "건조와 유수분 밸런스"
 DEFAULT_LIFESTYLE = "일상적인 실내 생활"
 
+# -------------------------------------------------
+# Rule-based TITLE generator (controller-side only)
+# -------------------------------------------------
+def build_title_rule(brand: str, product_name: str, skin_concern: str = "", benefit: str = "") -> str:
+    def _strip_ml(name: str) -> str:
+        return re.sub(r"\s*\d+\s*ml", "", name, flags=re.I).strip()
+
+    product_core = _strip_ml(product_name)
+
+    if skin_concern:
+        return f"✨{brand} {product_core}으로 {skin_concern} 케어✨"
+    if benefit:
+        return f"✨{brand} {product_core}으로 {benefit}!✨"
+    return f"✨{brand} {product_core}으로 촉촉하게✨"
+
+# -------------------------------------------------
+# Controller-side CRM slot_text builder (rule-based)
+# - Goal: controller must fulfill narrator contract by providing slot1_text~slot4_text.
+# - Narrator should only assemble/control, not invent missing slots.
+# -------------------------------------------------
+
+_CRM_SLOT_BANNED_FRAGMENTS = [
+    "오늘은",
+    "중요하다",
+    "필요하다",
+    "어쩌라고",
+    "설명",
+    "관찰",
+]
+
+
+def _is_ha_da_style(s: str) -> bool:
+    """Heuristic: block strong declarative narration style (..이다/..다.)"""
+    t = (s or "").strip()
+    if not t:
+        return True
+    # 흔한 '이다/다.' 종결 과다를 간단히 차단
+    return t.endswith("다.") or t.endswith("이다.") or t.endswith("합니다.") or t.endswith("되었습니다.")
+
+
+def _has_second_person_cue(s: str) -> bool:
+    t = (s or "").strip()
+    if not t:
+        return False
+    cues = ["요즘", "이라면", "면", "때", "신경", "느껴", "다면"]
+    return any(c in t for c in cues)
+
+
+# -------------------------------------------------
+# Slot length expanders (deterministic, no LLM)
+# -------------------------------------------------
+SLOT1_EXPANDERS = [
+    "피부 컨디션이 흔들릴수록 관리가 더 번거롭게 느껴질 수 있어요.",
+    "이럴 때일수록 루틴을 복잡하게 만들지 않는 게 중요해요.",
+]
+
+SLOT2_EXPANDERS = [
+    "지금처럼 컨디션이 예민할 때도 부담 없이 사용할 수 있는 쪽이에요.",
+]
+
+SLOT3_EXPANDERS = [
+    "사용 순서를 단순하게 유지하는 것만으로도 루틴 관리가 훨씬 편해져요.",
+]
+
+SLOT4_EXPANDERS = [
+    "지금 리듬에 맞춰 무리 없이 이어가기 좋은 선택이에요.",
+]
+
+
+def build_slot_texts_rule(
+    row: Dict[str, Any],
+    plan: Dict[str, Any],
+    product_name: str,
+    brand_name_slot: str,
+    brand_rule: Dict[str, Any],
+) -> Dict[str, str]:
+    """Deterministic slot builder.
+
+    Returns a dict with keys: slot1_text, slot2_text, slot3_text, slot4_text.
+    Each slot is a CRM utterance (not explanatory prose).
+    """
+    lifestyle = _norm_text(row.get("lifestyle"), DEFAULT_LIFESTYLE)
+    skin_concern = _norm_text(row.get("skin_concern"), DEFAULT_SKIN_CONCERN)
+    time_of_use = _norm_text(row.get("time_of_use"), "")
+    seasonality = _norm_text(row.get("seasonality"), "")
+    env_ctx = _norm_text(row.get("environment_context"), "")
+    texture = _norm_text(row.get("texture_preference"), "")
+    finish = _norm_text(row.get("finish_preference"), "")
+    price_sens = _norm_text(row.get("price_sensitivity"), "")
+    bundle_pref = _norm_text(row.get("bundle_preference"), "")
+    cta_style = _norm_text(row.get("cta_style"), "")
+
+    # controller-side keyword hints
+    env_keywords = row.get("lifestyle_keywords") or []
+    routine_phrase = _norm_text(row.get("routine_phrase"), "")
+
+    # slot1: context (why message now)
+    ctx_bits = []
+    if seasonality:
+        ctx_bits.append(seasonality)
+    if env_ctx:
+        ctx_bits.append(env_ctx)
+    if env_keywords:
+        ctx_bits.append(env_keywords[0])
+    if lifestyle and lifestyle not in ctx_bits:
+        ctx_bits.append(lifestyle)
+
+    ctx = " · ".join([b for b in ctx_bits if b])
+    if ctx:
+        slot1 = f"요즘 {ctx}에서 피부가 쉽게 {skin_concern} 쪽으로 기울면, 관리가 부담스럽게 느껴질 때가 있어요."
+    else:
+        slot1 = f"요즘 피부가 쉽게 {skin_concern} 쪽으로 기울면, 간단한 관리부터 다시 잡고 싶어질 때가 있어요."
+    if len(slot1) < 70:
+        slot1 = slot1 + " " + SLOT1_EXPANDERS[0]
+
+    # slot2: offer (why this product)
+    # keep it 1~2 reasons, avoid '도움이 됩니다' style
+    offer_bits = []
+    if texture:
+        offer_bits.append(f"{texture} 타입이라")
+    if finish:
+        offer_bits.append(f"마무리가 {finish}하게")
+
+    offer_reason = " ".join(offer_bits).strip()
+    if offer_reason:
+        slot2 = f"그래서 {brand_name_slot}의 {product_name}은(는) {offer_reason} 루틴에 끼워 넣기 편해요."
+    else:
+        slot2 = f"그래서 {brand_name_slot}의 {product_name}은(는) 지금 컨디션에 맞춰 루틴에 가볍게 얹기 편해요."
+    if len(slot2) < 80:
+        slot2 = slot2 + " " + SLOT2_EXPANDERS[0]
+
+    # slot3: usage flow (when/how)
+    use_bits = []
+    if time_of_use:
+        use_bits.append(time_of_use)
+    if routine_phrase:
+        use_bits.append(routine_phrase)
+    use_ctx = " ".join([b for b in use_bits if b]).strip()
+
+    if use_ctx:
+        slot3 = f"{use_ctx}에 손에 덜어 얇게 펴 바르고, 들뜨는 부분만 한 번 더 눌러주면 깔끔하게 마무리돼요."
+    else:
+        slot3 = "세안 후 바로 얇게 펴 바르고, 들뜨는 부분만 한 번 더 눌러주면 깔끔하게 마무리돼요."
+    if len(slot3) < 60:
+        slot3 = slot3 + " " + SLOT3_EXPANDERS[0]
+
+    # slot4: soft close (next action without heavy CTA)
+    close_bits = []
+    if price_sens and "높" in price_sens:
+        close_bits.append("세일 타이밍만 잘 맞추면 부담이 덜해요")
+    if bundle_pref and ("세트" in bundle_pref):
+        close_bits.append("세트 구성이면 루틴을 한 번에 정리하기 좋아요")
+    if cta_style and ("혜택" in cta_style or "가격" in cta_style):
+        close_bits.append("혜택이 있는 구간에 맞춰 가볍게 시작해도 충분해요")
+
+    close = " · ".join(_dedup_keep_order(close_bits))
+    if close:
+        slot4 = f"루틴을 과하게 늘리지 말고, {close} 쪽으로만 잡아도 컨디션이 안정되는 편이에요."
+    else:
+        slot4 = "루틴을 과하게 늘리지 말고, 오늘 컨디션에 맞게 가볍게 이어가도 충분해요."
+    if len(slot4) < 60:
+        slot4 = slot4 + " " + SLOT4_EXPANDERS[0]
+
+    # -------------------------------------------------
+    # BODY-length cumulative padding (controller responsibility)
+    # - Ensure total BODY length >= 300 before narrator
+    # - Deterministic, no LLM, no tone/judgment sentences
+    # -------------------------------------------------
+    slots = [slot1, slot2, slot3, slot4]
+    expanders = [SLOT1_EXPANDERS, SLOT2_EXPANDERS, SLOT3_EXPANDERS, SLOT4_EXPANDERS]
+
+    def _body_len(ss):
+        return len("".join(ss))
+
+    i = 0
+    MAX_ITERS = 20  # hard safety cap
+    while _body_len(slots) < 300 and i < MAX_ITERS:
+        idx = i % 4
+        pool = expanders[idx]
+        if pool:
+            slots[idx] = slots[idx] + " " + pool[i % len(pool)]
+        i += 1
+
+    slot1, slot2, slot3, slot4 = slots
+
+    return {
+        "slot1_text": slot1.strip(),
+        "slot2_text": slot2.strip(),
+        "slot3_text": slot3.strip(),
+        "slot4_text": slot4.strip(),
+    }
+
+
+def validate_slot_texts(slot_texts: Dict[str, str]) -> List[str]:
+    """Return a list of errors. Empty list means OK."""
+    errs: List[str] = []
+    warnings: List[str] = []
+    if not isinstance(slot_texts, dict):
+        return ["slot_texts_not_dict"]
+
+    required = ["slot1_text", "slot2_text", "slot3_text", "slot4_text"]
+    for k in required:
+        v = (slot_texts.get(k) or "").strip()
+        if not v:
+            errs.append(f"{k}_missing")
+            continue
+        if len(v) < 18:
+            errs.append(f"{k}_too_short")
+        if any(b in v for b in _CRM_SLOT_BANNED_FRAGMENTS):
+            errs.append(f"{k}_banned_fragment")
+        if _is_ha_da_style(v):
+            errs.append(f"{k}_hada_style")
+        # second-person cue is SOFT: do not hard-block slot validity
+        # handled later as warning, not error
+        pass
+
+    return _dedup_keep_order(errs)
+
 
 # lifestyle keyword hygiene (controller-side)
 # - Keep environment/context keywords for slot1
@@ -706,6 +924,16 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             continue
 
         row["상품명"] = product_name
+
+        # -------------------------------------------------
+        # TITLE 결정 로직 (rule-based, controller only)
+        # -------------------------------------------------
+        title_text = build_title_rule(
+            brand=brand,
+            product_name=product_name,
+            skin_concern=row.get("skin_concern", ""),
+            benefit=row.get("benefit", ""),
+        )
         # brand_name_slot 결정: 제품 기준 노출 브랜드 분기
         product_anchor = row.get("상품명") or row.get("product_anchor", "")
 
@@ -719,7 +947,10 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             print(f"[controller] row {i}/{len(rows)} plan")
 
         plan = planner.plan(row)
-
+        # Inject rule-based TITLE into plan after planning, before narrator
+        plan["title"] = title_text
+        # ensure narration row is always defined
+        narr_row = dict(row)
         # --- normalize outline to slot tags (reduce semantic over-specification) ---
         # We keep a stable 4-slot ordering to allow freer wording inside each slot.
         plan["message_outline"] = [
@@ -728,6 +959,33 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             "slot3_usage_flow",
             "slot4_soft_close",
         ]
+
+        # -------------------------------------------------
+        # NEW: controller must fulfill narrator contract by providing slot1_text~slot4_text.
+        # Rule-based first (deterministic), avoid narrator-side invention.
+        # -------------------------------------------------
+        slot_texts = build_slot_texts_rule(
+            row=row,
+            plan=plan,
+            product_name=product_name,
+            brand_name_slot=row.get("brand_name_slot", brand),
+            brand_rule=brand_rule,
+        )
+        slot_errs = validate_slot_texts(slot_texts)
+        if slot_errs:
+            results.append({
+                "persona_id": row.get("persona_id"),
+                "brand": brand,
+                "message": "",
+                "errors": ["invalid_or_insufficient_crm_slots"] + slot_errs,
+                "plan": plan,
+                "row": row,
+                "brand_rule": brand_rule,
+            })
+            continue
+
+        # inject slots into plan for StrategyNarrator
+        plan.update(slot_texts)
 
         # --- controller contract enforcement (slot safety) ---
         # 2) hard product anchor (prevent slot2 being eaten)
@@ -751,8 +1009,7 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             print(f"[controller] row {i}/{len(rows)} generate")
 
         # --- narration row sanitization (marketing context) ---
-        narr_row = dict(row)
-
+        # narr_row is already defined above
         # Anti-aging / dry-skin persona guardrail
         skin_concern_raw = str(row.get("skin_concern", ""))
         if "주름" in skin_concern_raw or "탄력" in skin_concern_raw or "건성" in skin_concern_raw:
@@ -768,6 +1025,9 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         if _is_already_rendered_message(narr_row.get("raw_text")):
             narr_row["raw_text"] = ""
 
+        # narrator skip condition respects title existence and slot completion
+        if not title_text or any(k not in plan for k in ["slot1_text","slot2_text","slot3_text","slot4_text"]):
+            continue
         msg = narrator.generate(row=narr_row, plan=plan, brand_rule=brand_rule)
 
         # [CONTROLLER GUARD] narrator 결과가 다시 중첩되지 않도록 보정
@@ -780,74 +1040,28 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         # StrategyNarrator may return a structured dict.
         # Controller must enforce a clean (TITLE line, BODY line) contract here.
         if isinstance(msg, dict):
-            title, body = _normalize_title_body_from_dict(msg)
+            _, body = _normalize_title_body_from_dict(msg)
         else:
-            title, body = _parse_title_body(msg)
+            _, body = _parse_title_body(msg)
+
+        title = f"TITLE: {title_text}"
 
         clean_body = body.replace("BODY:", "", 1).strip()
         MIN_BODY_LEN = 300
-        MAX_RETRY = 3
 
-        # 상품명 단독 BODY는 즉시 차단
-        if clean_body.strip() == product_name.strip():
-            clean_body = ""
-
-        attempts = 0
-        last_valid_body = ""
-
-        while attempts < MAX_RETRY:
-            if clean_body and len(clean_body) >= MIN_BODY_LEN:
-                break
-
-            attempts += 1
-
-            retry_feedback = (
-                f"현재 BODY 길이는 {len(clean_body)}자입니다. "
-                f"상품명 단독 문장이나 요약은 금지됩니다. "
-                f"300~350자 분량의 완결된 마케팅 문단으로 다시 작성하세요. "
-                f"제품명({product_name})과 브랜드({brand})를 문장 안에 자연스럽게 포함하세요."
-            )
-
-            retry_row = dict(narr_row)
-            retry_row["llm_feedback"] = retry_feedback
-
-            try:
-                retry_msg = narrator.generate(
-                    row=retry_row,
-                    plan=plan,
-                    brand_rule=brand_rule,
-                )
-            except Exception:
-                retry_msg = None
-
-            if isinstance(retry_msg, dict):
-                r_title, r_body = _normalize_title_body_from_dict(retry_msg)
-            else:
-                r_title, r_body = _parse_title_body(retry_msg)
-
-            retry_clean_body = r_body.replace("BODY:", "", 1).strip()
-
-            if retry_clean_body and len(retry_clean_body) >= MIN_BODY_LEN:
-                clean_body = retry_clean_body
-                break
-
-            if retry_clean_body:
-                last_valid_body = retry_clean_body
-
-            clean_body = retry_clean_body
-
-        # ---- Hard-template fallback (최종 실패 시) ----
-        if not clean_body or len(clean_body) < MIN_BODY_LEN:
-            clean_body = (
-                f"{brand}의 {product_name}은(는) "
-                f"{row.get('skin_concern','피부 고민')}을(를) 고려해 설계된 제품으로, "
-                f"{row.get('lifestyle','일상적인 사용 환경')}에서도 부담 없이 사용할 수 있도록 "
-                f"사용감과 흡수감을 중심으로 완성되었습니다. "
-                f"루틴 속에서 자연스럽게 이어지는 사용 흐름을 통해 피부 컨디션을 안정적으로 유지하는 데 도움을 주며, "
-                f"과하지 않은 마무리감으로 매일의 관리에 무리 없이 녹아듭니다. "
-                f"지속적인 사용을 통해 피부 밸런스를 정돈하고, "
-                f"일상의 관리 루틴을 보다 편안하게 만들어주는 방향으로 설계되었습니다."
-            )
+        # Hard block: too-short body should fail fast here.
+        # Controller should not re-invoke narrator for expansion/fallback at this stage.
+        if (not clean_body) or (len(clean_body) < MIN_BODY_LEN):
+            results.append({
+                "persona_id": row.get("persona_id"),
+                "brand": brand,
+                "message": "",
+                "errors": ["body_too_short(hard_block)", f"body_len={len(clean_body)}"],
+                "plan": plan,
+                "row": row,
+                "brand_rule": brand_rule,
+            })
+            continue
 
         body = "BODY: " + clean_body
 
@@ -863,45 +1077,7 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
         if len(clean_body) > 350:
             literal_warnings.append("body_len>350")
 
-        # (2) 옵션 B 컷 로직: verifier 실행 이전, warnings에 body_len>350 있을 때만 동작 (옵션 B)
-        if i == 1 and "body_len>350" in literal_warnings:
-            def _split_sentences_keep_punct(text):
-                # Split on [.!?] but keep delimiter at end of each sentence
-                import re
-                sentence_end = re.compile(r'([^\.\?\!]*[\.\?\!])')
-                matches = sentence_end.findall(text)
-                # If any trailing text without punctuation, add as last sentence
-                rest = sentence_end.sub('', text)
-                if rest.strip():
-                    matches.append(rest)
-                # Remove empty
-                return [m.strip() for m in matches if m.strip()]
-
-            sentences = _split_sentences_keep_punct(clean_body)
-            # 컷 로직은 문장 3개 미만이면 skip
-            if len(sentences) >= 3:
-                cut_applied = False
-                # remove second-to-last sentence
-                cut1 = list(sentences)
-                if len(cut1) >= 2:
-                    del cut1[-2]
-                cut_body1 = ' '.join(cut1).strip()
-                if len(cut1) >= 3:
-                    # remove third-to-last sentence as well
-                    cut2 = list(cut1)
-                    del cut2[-3]
-                    cut_body2 = ' '.join(cut2).strip()
-                    clean_body = cut_body2
-                    cut_applied = True
-                else:
-                    clean_body = cut_body1
-                    cut_applied = True
-                if cut_applied:
-                    body = "BODY: " + clean_body
-            else:
-                body = "BODY: " + clean_body
-        else:
-            body = "BODY: " + clean_body
+        body = "BODY: " + clean_body
 
         # Validate ONLY the primary (top-1) message.
         # top-k rows are candidates/comparisons; validating them causes brand_missing by design.

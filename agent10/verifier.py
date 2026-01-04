@@ -21,6 +21,24 @@ class MessageVerifier:
         self._product_catalog_path: Optional[str] = product_catalog_path
         self._ensure_product_brand_map_loaded()
 
+    def _has_second_person_cue(self, text: str) -> bool:
+        """
+        Heuristic: Checks if the text contains a second-person cue.
+        This is a SOFT check used only for warnings, never errors.
+        """
+        if not text:
+            return False
+
+        cues = [
+            r"\byou\b", r"\byour\b", r"\byours\b", r"\byourselves\b",
+            r"당신", r"너", r"고객님", r"여러분"
+        ]
+
+        for cue in cues:
+            if re.search(cue, text, re.IGNORECASE):
+                return True
+        return False
+
     def _has_brand(self, text: str, brand: str) -> bool:
         if not brand:
             return True
@@ -327,6 +345,10 @@ class MessageVerifier:
             if not self._has_skin_concern(combined_text, skin_concerns):
                 # Neutralize hard failure: do not append errors
                 warnings.append("skin_concern_missing")
+
+        # Second-person cue soft warning (never error)
+        if not self._has_second_person_cue(combined_text):
+            warnings.append("weak_second_person_cue")
 
         # Slot count check (require at least 4 lines)
         if self._count_slots(body) < 4:
