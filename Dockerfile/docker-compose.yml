@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: agent10_user
       POSTGRES_PASSWORD: agent10_pass
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +21,7 @@ services:
 
   agent10:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile/dockerfile   
     container_name: agent10-crm
     depends_on:
@@ -38,7 +38,7 @@ services:
       DB_USER: agent10_user
       DB_PASSWORD: agent10_pass
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     command: python agent10/run_agent10_test.py
 
 volumes:

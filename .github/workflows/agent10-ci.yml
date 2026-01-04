@@ -2,9 +2,9 @@ name: Agent10 CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   agent10-test:
@@ -19,7 +19,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t agent10-ci .
+          docker build -t agent10-ci -f Dockerfile/dockerfile .
 
       - name: Run Agent10 pipeline (OFFLINE)
         run: |

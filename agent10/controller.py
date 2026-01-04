@@ -1,3 +1,4 @@
+from typing import List, Dict, Any, Optional, Tuple
 # -------------------------------------------------
 # Persona-level brand rule filtering (post brand-sample)
 # -------------------------------------------------
