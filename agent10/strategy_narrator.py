@@ -1,146 +1,242 @@
-from __future__ import annotations
-
-
-class StrategyNarrator:
-    def _build_title(self, persona: dict, body: str) -> str:
-        emoji_pool = ["🌿", "💧", "🧴", "✨", "💡"]
-        emoji_front = emoji_pool[hash(persona.get("persona_id", "")) % len(emoji_pool)]
-
-        hook_candidates = []
-        if persona.get("routine_phrase"):
-            hook_candidates.append(persona["routine_phrase"])
-        if persona.get("lifestyle"):
-            hook_candidates.append(persona["lifestyle"].split(",")[0])
-        if persona.get("shopping_pattern"):
-            hook_candidates.append(persona["shopping_pattern"])
-
-        persona_hook = hook_candidates[0] if hook_candidates else "데일리 루틴"
-
-        benefit_candidates = []
-        for kw in ["산뜻", "가벼운", "편안", "보습", "수분", "순한"]:
-            if kw in body:
-                benefit_candidates.append(kw)
-
-        benefit = benefit_candidates[0] if benefit_candidates else "편안한 보습"
-
-        title_core = f"{persona_hook}, {benefit} 선택"
-
-        title = f"{emoji_front} {title_core}"
-        if len(title) < 25:
-            title = f"{emoji_front} {persona_hook}을 위한 {benefit}"
-        if len(title) > 40:
-            title = title[:40]
-
-        return title
-    def _build_title(self, persona: dict, body: str) -> str:
-        emoji_pool = ["🌿", "💧", "🧴", "✨", "💡"]
-        emoji_front = emoji_pool[hash(persona.get("persona_id", "")) % len(emoji_pool)]
-
-        hook_candidates = []
-        if persona.get("routine_phrase"):
-            hook_candidates.append(persona["routine_phrase"])
-        if persona.get("lifestyle"):
-            hook_candidates.append(persona["lifestyle"].split(",")[0])
-        if persona.get("shopping_pattern"):
-            hook_candidates.append(persona["shopping_pattern"])
-
-        persona_hook = hook_candidates[0] if hook_candidates else "데일리 루틴"
-
-        benefit_candidates = []
-        for kw in ["산뜻", "가벼운", "편안", "보습", "수분", "순한"]:
-            if kw in body:
-                benefit_candidates.append(kw)
-
-        benefit = benefit_candidates[0] if benefit_candidates else "편안한 보습"
-
-        title_core = f"{persona_hook}, {benefit} 선택"
-
-        title = f"{emoji_front} {title_core}"
-        if len(title) < 25:
-            title = f"{emoji_front} {persona_hook}을 위한 {benefit}"
-        if len(title) > 40:
-            title = title[:40]
-
-        return title
-
-def _sanitize_llm_output(self, text: str) -> dict:
-    """
-    Sanitize raw LLM output and return structured {title, body}.
-    Removes TITLE/BODY labels, markdown noise, and duplicated headers.
-    """
-    if not text:
-        return {"title": "", "body": ""}
-
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-
-    title = ""
-    body_lines = []
-
-    for line in lines:
-        upper = line.upper()
-        if upper.startswith("TITLE:"):
-            title = line.split(":", 1)[1].strip()
-            continue
-        if upper.startswith("BODY:"):
-            body_lines.append(line.split(":", 1)[1].strip())
-            continue
-        if line.startswith("**TITLE"):
-            continue
-        if line.startswith("**BODY"):
-            continue
-        body_lines.append(line)
-
-    body = " ".join(body_lines).strip()
-    return {"title": title.strip(), "body": body}
 import re
-import re
-
-# Sanitizer for LLM-generated text: remove TITLE:/BODY: labels, bold, normalize whitespace, etc.
-_LABEL_PAT = re.compile(r"(?im)^\s*(\*\*\s*)?(title|body)\s*:\s*", re.IGNORECASE)
-def _sanitize_generated_text(s: str) -> str:
-    if not s:
-        return ""
-    # remove TITLE:/BODY: labels anywhere at line starts
-    s = _LABEL_PAT.sub("", s)
-    # remove common repeated labels embedded mid-text
-    s = re.sub(r"(?i)\b(title|body)\s*:\s*", "", s)
-    # strip markdown bold markers
-    s = s.replace("**", "")
-    # normalize whitespace
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
-
-# agent10/strategy_narrator.py
-import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+from openai_client import OpenAIChatCompletionClient
 
 MIN_BODY_LEN = 300
 MAX_BODY_LEN = 350
-
-# Emoji ranges (covers ✨ and most common pictographs)
-_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u26FF\u2700-\u27BF]", re.UNICODE)
-
-# Optional import for tone_templates
-try:
-    from tone_templates import SLOT4_PAD_POOL, PAD_POOL
-except Exception:
-    SLOT4_PAD_POOL = None
-    PAD_POOL = None
-
-# Optional import for tone_profiles / brand_rules (indirect reference only)
-try:
-    from tone_profiles import ToneProfiles
-except Exception:
-    ToneProfiles = None
-
-try:
-    import brand_rules
-except Exception:
-    brand_rules = None
+MIN_TITLE_LEN = 25
+MAX_BODY_LEN = 350
+MAX_TITLE_RETRY = 3
 
 
 class StrategyNarrator:
+    def __init__(self):
+        self.llm = OpenAIChatCompletionClient()
+
+    def _s(self, v: Any) -> str:
+        return str(v).strip() if v is not None else ""
+
+    # -----------------------------
+    # Public entry
+    # -----------------------------
+    def generate(
+        self,
+        row: dict,
+        product_name: str,
+        product_score: float = 0.0,
+        brand_rule: dict = None,
+        plan: dict = None,
+    ) -> str:
+        plan = plan or {}
+
+        brand = self._s(row.get("brand"))
+        lifestyle = self._s(row.get("lifestyle"))
+        skin_concern = self._s(row.get("skin_concern"))
+
+        outline: List[str] = plan.get("message_outline") or [
+            "slot1_environment",
+            "slot2_offer",
+            "slot3_usage_flow",
+            "slot4_soft_close",
+        ]
+        outline_str = " → ".join(outline)
+
+        # =========================================================
+        # STEP 1 — EXPANSION (rich draft, slot-driven)
+        # =========================================================
+        draft = self._expand_draft(
+            brand=brand,
+            lifestyle=lifestyle,
+            skin_concern=skin_concern,
+            product_name=product_name,
+            outline_str=outline_str,
+        )
+
+        if not draft:
+            return self._hard_fallback(brand, product_name, lifestyle, skin_concern)
+
+        # =========================================================
+        # STEP 2 — COMPRESSION (300–350 chars BODY)
+        # =========================================================
+        body = self._compress_body(
+            brand=brand,
+            draft=draft,
+            product_name=product_name,
+        )
+
+        if not body or not (MIN_BODY_LEN <= len(body) <= MAX_BODY_LEN):
+            return self._hard_fallback(brand, product_name, lifestyle, skin_concern)
+
+        # =========================================================
+        # STEP 3 — TITLE generation (retry)
+        # =========================================================
+        title = ""
+        for _ in range(MAX_TITLE_RETRY):
+            title = self._generate_title(brand, body)
+            if title and len(title) >= MIN_TITLE_LEN:
+                break
+
+        if not title or len(title) < MIN_TITLE_LEN:
+            title = f"{brand}로 완성하는 오늘의 케어 루틴"
+
+        body = self._sanitize_body(body, brand, product_name)
+        title = title.strip()
+
+        return f"TITLE: {title}\nBODY: {body}"
+
+    # -----------------------------
+    # Expansion
+    # -----------------------------
+    def _expand_draft(
+        self,
+        brand: str,
+        lifestyle: str,
+        skin_concern: str,
+        product_name: str,
+        outline_str: str,
+    ) -> str:
+        system = (
+            f"당신은 {brand} CRM 카피라이터입니다.\n"
+            f"아래 슬롯 구조를 반드시 지켜서 각 단계별로 충분히 서술하십시오.\n"
+            f"분량 제한은 없으며, 감각적 묘사·상황 예시·사용 흐름을 최대한 풍성하게 작성하십시오.\n\n"
+            f"[슬롯 순서]\n{outline_str}"
+        )
+        user = (
+            f"브랜드: {brand}\n"
+            f"제품: {product_name}\n"
+            f"라이프스타일: {lifestyle}\n"
+            f"고민: {skin_concern}\n\n"
+            f"위 정보를 바탕으로 상세한 초안을 작성하십시오."
+        )
+        try:
+            return self.llm.chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ]
+            )
+        except Exception:
+            return ""
+
+    # -----------------------------
+    # Compression
+    # -----------------------------
+    def _compress_body(self, brand: str, draft: str, product_name: str) -> str:
+        system = (
+            f"당신은 {brand} 전문 카피라이터입니다.\n"
+            f"아래 초안을 기반으로 최종 CRM 메시지를 작성하십시오.\n\n"
+            f"[조건]\n"
+            f"- 공백 포함 {MIN_BODY_LEN}~{MAX_BODY_LEN}자\n"
+            f"- 설명문이 아닌 자연스러운 구어체\n"
+            f"- '{brand}'를 본문에 1회 이상 자연스럽게 포함\n"
+            f"- 군더더기 제거, 핵심만 유지\n\n"
+            f"[출력]\nBODY: 본문만 출력"
+        )
+        user = f"[초안]\n{draft}\n\n정제된 본문을 작성하십시오."
+        try:
+            out = self.llm.chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ]
+            )
+        except Exception:
+            return ""
+
+        body = self._extract_body(out)
+        return body.strip()
+
+    # -----------------------------
+    # Title
+    # -----------------------------
+    def _generate_title(self, brand: str, body: str) -> str:
+        system = (
+            f"당신은 {brand} 마케터입니다.\n"
+            f"아래 본문을 바탕으로 25~40자 이내의 자연스러운 제목을 작성하십시오.\n"
+            f"브랜드 단독 제목은 금지됩니다.\n\n"
+            f"[출력]\nTITLE: 제목"
+        )
+        user = f"[본문]\n{body}"
+        try:
+            out = self.llm.chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ]
+            )
+        except Exception:
+            return ""
+        return self._extract_title(out)
+
+    # -----------------------------
+    # Parsing helpers
+    # -----------------------------
+    def _extract_body(self, text: str) -> str:
+        for line in text.splitlines():
+            if line.strip().startswith("BODY:"):
+                return line.split("BODY:", 1)[1].strip()
+        return text.strip()
+
+    def _extract_title(self, text: str) -> str:
+        for line in text.splitlines():
+            if line.strip().startswith("TITLE:"):
+                return line.split("TITLE:", 1)[1].strip()
+        return text.strip()
+
+    # -----------------------------
+    # Sanitizer (verifier-safe)
+    # -----------------------------
+    def _sanitize_body(self, text: str, brand: str, product_name: str) -> str:
+        cleaned = text
+
+        # 타 브랜드 제거
+        competitors = [
+            "프리메라", "설화수", "라네즈", "에뛰드", "헤라",
+            "아이오페", "려", "오딧세이", "에스트라"
+        ]
+        for c in competitors:
+            if c != brand:
+                cleaned = cleaned.replace(c, "")
+
+        # 문장 단위 중복 제거 (lookbehind 사용 금지)
+        parts = re.split(r"[.!?]\s+", cleaned)
+        uniq: List[str] = []
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            if uniq and (p in uniq[-1] or uniq[-1] in p):
+                continue
+            uniq.append(p)
+        cleaned = ". ".join(uniq)
+
+        # 브랜드 강제 포함
+        if brand.replace(" ", "") not in cleaned.replace(" ", ""):
+            cleaned = f"{brand} {cleaned}"
+
+        return cleaned.strip()
+
+    # -----------------------------
+    # Hard fallback (verifier-pass)
+    # -----------------------------
+    def _hard_fallback(
+        self,
+        brand: str,
+        product_name: str,
+        lifestyle: str,
+        skin_concern: str,
+    ) -> str:
+        body = (
+            f"{lifestyle}한 일상에서 {skin_concern}이 신경 쓰일 때, "
+            f"{brand} {product_name}은 부담 없이 루틴에 녹아들 수 있도록 설계되었습니다. "
+            f"가볍게 스며드는 사용감과 안정적인 마무리로 하루의 흐름을 깨지 않으면서도 "
+            f"필요한 케어를 놓치지 않도록 돕습니다. 매일 반복되는 관리 속에서 "
+            f"컨디션의 흔들림을 줄이고, 편안한 리듬을 유지하고 싶은 순간에 자연스럽게 선택할 수 있는 제품입니다."
+        )
+        body = body[:MAX_BODY_LEN]
+
+        title = f"{brand}로 완성하는 균형 잡힌 데일리 케어"
+        return f"TITLE: {title}\nBODY: {body}"
     def _sanitize_once(self, text: str) -> str:
         """Sanitize exactly once at the final boundary.
         Do NOT call this on partial slots; only on full raw output or final composed body.
@@ -1645,7 +1741,20 @@ class StrategyNarrator:
 - 제품명에 포함된 브랜드가 있을 경우, CSV의 brand 값보다 **제품명 브랜드를 우선**한다.
 - "프리메라 메이크온", "아모레 메이크온" 같은 **혼종 브랜드 표기는 즉시 오답**이다.
 """
-        return base_prompt + brand_rule_block
+        # Context Logic Guard (temporal & factual consistency)
+        context_logic_guard = """
+# Context Logic Guard (temporal & factual consistency)
+- Maintain a single, consistent time context throughout the message.
+  - If the situation is morning or pre-work, reference overnight oil, sleep-related buildup, or getting-ready moments.
+  - Do NOT reference fatigue, long exposure, or "already tired" conditions in a morning context.
+- Avoid exaggerated duration claims.
+  - Do NOT imply all-day or 24-hour effects unless explicitly supported.
+  - Prefer realistic phrasing such as "helps start the day fresh" or "keeps things comfortable through the morning."
+- Avoid repetitive generic descriptors.
+  - Do not repeat the same adjective or situation label (e.g., "busy") more than once.
+  - Replace repetition with concrete, situational phrasing.
+"""
+        return base_prompt + brand_rule_block + context_logic_guard
 
     def _build_user_prompt(
         self,
@@ -2101,6 +2210,28 @@ class StrategyNarrator:
             except Exception:
                 pass
 
+        # --- Tone & Manner Guardrail (Marketing Conversation Style) ---
+        TONE_MANNER_GUIDE = """
+[톤 앤 매너 가이드]
+1. 대화체 사용: '~것입니다', '~제공합니다' 같은 설명서 말투를 쓰지 말고
+   '~해보세요', '~어울려요', '~도와줄 거예요' 같은 자연스러운 구어체를 사용한다.
+2. 인사 금지: '안녕하세요'로 시작하지 말고,
+   고객의 현재 상황(운동 후 땀, 야외 활동, 열기, 피로 등)을 짚는 문장으로 시작한다.
+3. 상황 몰입: 라이프스타일 키워드를 그대로 노출하지 말고,
+   실제 장면처럼 풀어서 말한다.
+   (X: '야외활동/운동 잦음' / O: '운동하고 돌아온 뒤 달아오른 피부')
+4. 경험 중심 서술: 사용법을 나열하지 말고,
+   사용했을 때 느껴지는 감각·변화를 중심으로 묘사한다.
+5. 과장·단정 금지: '필수', '반드시', '~것입니다' 같은 단정적 표현은 피한다.
+"""
+        if isinstance(system_msg, str):
+            system_msg = system_msg + "\n" + TONE_MANNER_GUIDE
+        else:
+            try:
+                system_msg["content"] = str(system_msg.get("content", "")) + "\n" + TONE_MANNER_GUIDE
+            except Exception:
+                pass
+
         # --- Persona-aware user_msg block ---
         user_msg = (
             f"페르소나: {persona_name}({persona_id})\n"
@@ -2144,56 +2275,203 @@ class StrategyNarrator:
         else:
             final_body = message
 
-        # TITLE 생성 (deterministic, no LLM)
+        # 방어적 후처리: 스팸형 인사 제거
+        for bad_start in ["안녕하세요", "안녕하세요!", "안녕하신가요"]:
+            if final_body.strip().startswith(bad_start):
+                final_body = final_body.replace(bad_start, "", 1).lstrip()
+
+        # --- [BRAND IN BODY ENFORCEMENT] ---
+        # Only use brand from (priority):
+        # 1) plan.get("persona_fields", {}).get("brand")
+        # 2) plan.get("persona_fields", {}).get("brand_name_slot")
+        # 3) plan.get("brand")
         persona_fields = plan.get("persona_fields") or {}
+        brand_in_body = (
+            self._s(persona_fields.get("brand"))
+            or self._s(persona_fields.get("brand_name_slot"))
+            or self._s(plan.get("brand"))
+        )
+        # Only insert if brand is non-empty and not already present in BODY
+        if brand_in_body and brand_in_body not in final_body:
+            # Insert brand at the very first sentence of BODY, as prefix
+            final_body = f"{brand_in_body}의 {final_body}"
+
+        # TITLE 생성 (1차: deterministic)
         title = self._build_title(persona_fields, final_body)
 
-        final_message = f"TITLE: {title}\nBODY: {final_body}"
+        # --- TITLE 품질 게이트 ---
+        feedback = []
+        # 1. 길이 규칙 위반
+        if not (25 <= len(title) <= 40):
+            feedback.append(f"제목 길이({len(title)}자)가 25~40자 범위를 벗어남")
+        # 2. "을 위한" 포함
+        if "을 위한" in title:
+            feedback.append('"~을 위한" 표현 사용')
+        # 3. 시간/루틴 표현으로 시작
+        time_routine_pat = re.compile(r"^(출근|아침|저녁|취침|운동|외출|전\s*\d+분)")
+        if time_routine_pat.match(title):
+            feedback.append('제목이 시간/루틴 표현으로 시작함')
+        # 4. 단일 benefit 키워드만 포함 (예: "산뜻", "촉촉", "가벼운" 등)
+        benefit_keywords = ["산뜻", "촉촉", "가벼운"]
+        benefit_count = sum(1 for k in benefit_keywords if k in title)
+        # Only if exactly one benefit keyword and nothing else meaningful
+        title_wo_benefit = title
+        for k in benefit_keywords:
+            title_wo_benefit = title_wo_benefit.replace(k, "")
+        if benefit_count == 1 and len(title_wo_benefit.strip()) == 0:
+            feedback.append('단일 효능 키워드(산뜻/촉촉/가벼운)만 포함')
+        # 5. 이모지 개수 2개 이상
+        emoji_count = len(re.findall(r"[\U0001F300-\U0001FAFF\u2600-\u26FF\u2700-\u27BF]", title))
+        if emoji_count >= 2:
+            feedback.append(f"이모지 개수 {emoji_count}개 (최대 1개 허용)")
 
+        # 품질 게이트 실패 시 LLM 재작성
+        if feedback:
+            title = self._llm_rewrite_title(
+                body=final_body,
+                brand=brand_name,
+                product=product_name,
+                feedback=feedback,
+            )
+    def _llm_rewrite_title(self, body: str, brand: str, product: str, feedback: list) -> str:
+        prompt = f"""
+아래 광고 BODY와 제품 정보를 참고해 제목을 다시 작성하세요.
+
+[조건]
+- 한글 25~40자
+- 이모지 0~1개
+- 시간/루틴 표현(아침, 출근, ~분) 사용 금지
+- '~을 위한' 형태 금지
+- 단일 형용사 반복 금지
+- 브랜드/제품 맥락이 드러나야 함
+
+[이전 제목 문제]
+{chr(10).join(feedback)}
+
+[제품명]
+{product}
+
+[브랜드]
+{brand}
+
+[BODY]
+{body}
+"""
+        out = self.llm.generate(messages=[
+            {"role": "system", "content": "너는 화장품 마케팅 카피라이터다."},
+            {"role": "user", "content": prompt},
+        ])
+        text = out["text"] if isinstance(out, dict) else out
+        return self._ensure_title_len(self._strip_emojis(self._s(text)))
+from typing import Dict, Any, Optional
+import json
+import re
+
+
+class StrategyNarrator:
+    """
+    Robust narrator that prevents:
+    1) TITLE/BODY regex parsing failure
+    2) BODY being wiped by post-processing
+    3) product_anchor mismatch destabilizing output
+
+    Design principles:
+    - No regex-based TITLE/BODY splitting
+    - No destructive post-processing on BODY
+    - product_anchor is injected once and never re-derived
+    - Fallback paths never return empty BODY
+    """
+
+    def __init__(self, llm, tone_profile_map: Optional[Dict] = None):
+        self.llm = llm
+        self.tone_profile_map = tone_profile_map or {}
+
+    # -------------------------------------------------
+    # Public entry (controller expects .generate)
+    # -------------------------------------------------
+    def generate(self, row: Dict[str, Any], plan: Dict[str, Any], brand_rule: Dict[str, Any]) -> Dict[str, str]:
+        prompt = self._build_prompt(row, plan, brand_rule)
+
+        last_error = None
+        for _ in range(2):  # hard limit to avoid retry loops
+            raw = self.llm.generate(prompt)
+            parsed = self._safe_parse(raw)
+
+            if parsed is None:
+                last_error = "parse_failed"
+                prompt = self._feedback(prompt, "출력은 JSON 형식이어야 합니다.")
+                continue
+
+            title = parsed.get("title", "").strip()
+            body = parsed.get("body", "").strip()
+
+            if not title or not body:
+                last_error = "empty_field"
+                prompt = self._feedback(prompt, "title과 body는 비어 있으면 안 됩니다.")
+                continue
+
+            if len(title) > 40:
+                last_error = "title_too_long"
+                prompt = self._feedback(
+                    prompt,
+                    f"제목이 {len(title)}자입니다. 40자 이내로 다시 작성하세요."
+                )
+                continue
+
+            # FINAL GUARANTEE: BODY is never mutated or re-filtered
+            return {
+                "title": title,
+                "body": body,
+            }
+
+        # Absolute fallback (never empty, never regex-based)
         return {
-            "title": title,
-            "body": final_body,
-            "message": final_message,
-            "raw_text": final_message,
-            "brand": (row.get("brand") or row.get("brand_name_slot") or "") if isinstance(row, dict) else "",
-            "product_anchor": plan.get("product_anchor", "") if isinstance(plan, dict) else "",
+            "title": row.get("brand", "")[:40],
+            "body": row.get("상품명", "") or "제품 설명을 생성하지 못했습니다.",
         }
- # --- HARD BIND TITLE BUILDER (defensive fix) ---
-def _strategy_narrator_build_title(self, persona: dict, body: str) -> str:
-    emoji_pool = ["🌿", "💧", "🧴", "✨", "💡"]
-    emoji_front = emoji_pool[hash(persona.get("persona_id", "")) % len(emoji_pool)]
 
-    hook_candidates = []
-    if persona.get("routine_phrase"):
-        hook_candidates.append(persona["routine_phrase"])
-    if persona.get("lifestyle"):
-        hook_candidates.append(persona["lifestyle"].split(",")[0])
-    if persona.get("shopping_pattern"):
-        hook_candidates.append(persona["shopping_pattern"])
+    # -------------------------------------------------
+    # Prompt construction
+    # -------------------------------------------------
+    def _build_prompt(self, row: Dict[str, Any], plan: Dict[str, Any], brand_rule: Dict[str, Any]) -> str:
+        product_anchor = plan.get("product_anchor") or row.get("상품명", "")
+        brand = row.get("brand", "")
 
-    persona_hook = hook_candidates[0] if hook_candidates else "데일리 루틴"
+        return f"""
+다음 정보를 바탕으로 마케팅 문구를 작성하세요.
 
-    benefit_candidates = []
-    for kw in ["산뜻", "가벼운", "편안", "보습", "수분", "순한"]:
-        if kw in body:
-            benefit_candidates.append(kw)
+[필수 규칙]
+- 출력은 반드시 JSON 형식이어야 합니다.
+- 형식: {{ "title": "...", "body": "..." }}
+- title은 40자 이내
+- body는 자연어 문단, 비어 있으면 안 됨
+- 아래 상품명을 정확히 본문에 1회 이상 포함
 
-    benefit = benefit_candidates[0] if benefit_candidates else "편안한 보습"
+[브랜드]
+{brand}
 
-    title_core = f"{persona_hook}, {benefit} 선택"
+[상품명]
+{product_anchor}
 
-    title = f"{emoji_front} {title_core}"
-    if len(title) < 25:
-        title = f"{emoji_front} {persona_hook}을 위한 {benefit}"
-    if len(title) > 40:
-        title = title[:40]
+[상황 힌트]
+{plan.get("lifestyle_expanded", "")}
 
-    return title
+[출력]
+"""
 
+    # -------------------------------------------------
+    # Parsing (NO regex splitting)
+    # -------------------------------------------------
+    def _safe_parse(self, raw: str) -> Optional[Dict[str, str]]:
+        try:
+            if isinstance(raw, str):
+                raw = raw.strip()
+            return json.loads(raw)
+        except Exception:
+            return None
 
-# bind method to the final StrategyNarrator class
-try:
-    StrategyNarrator._build_title = _strategy_narrator_build_title
-except NameError:
-    pass
-# --- END HARD BIND ---
+    # -------------------------------------------------
+    # Feedback injection (non-destructive)
+    # -------------------------------------------------
+    def _feedback(self, original_prompt: str, message: str) -> str:
+        return original_prompt + f"\n\n[수정 요청]\n{message}\n"

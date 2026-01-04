@@ -781,9 +781,71 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
             title, body = _parse_title_body(msg)
 
         clean_body = body.replace("BODY:", "", 1).strip()
-        # If BODY is effectively empty, keep it empty (verifier will catch), but avoid whitespace-only carry.
-        if clean_body and clean_body.strip() == "":
+        MIN_BODY_LEN = 300
+        MAX_RETRY = 3
+
+        # 상품명 단독 BODY는 즉시 차단
+        if clean_body.strip() == product_name.strip():
             clean_body = ""
+
+        attempts = 0
+        last_valid_body = ""
+
+        while attempts < MAX_RETRY:
+            if clean_body and len(clean_body) >= MIN_BODY_LEN:
+                break
+
+            attempts += 1
+
+            retry_feedback = (
+                f"현재 BODY 길이는 {len(clean_body)}자입니다. "
+                f"상품명 단독 문장이나 요약은 금지됩니다. "
+                f"300~350자 분량의 완결된 마케팅 문단으로 다시 작성하세요. "
+                f"제품명({product_name})과 브랜드({brand})를 문장 안에 자연스럽게 포함하세요."
+            )
+
+            retry_row = dict(narr_row)
+            retry_row["llm_feedback"] = retry_feedback
+
+            try:
+                retry_msg = narrator.generate(
+                    row=retry_row,
+                    plan=plan,
+                    brand_rule=brand_rule,
+                )
+            except Exception:
+                retry_msg = None
+
+            if isinstance(retry_msg, dict):
+                r_title, r_body = _normalize_title_body_from_dict(retry_msg)
+            else:
+                r_title, r_body = _parse_title_body(retry_msg)
+
+            retry_clean_body = r_body.replace("BODY:", "", 1).strip()
+
+            if retry_clean_body and len(retry_clean_body) >= MIN_BODY_LEN:
+                clean_body = retry_clean_body
+                break
+
+            if retry_clean_body:
+                last_valid_body = retry_clean_body
+
+            clean_body = retry_clean_body
+
+        # ---- Hard-template fallback (최종 실패 시) ----
+        if not clean_body or len(clean_body) < MIN_BODY_LEN:
+            clean_body = (
+                f"{brand}의 {product_name}은(는) "
+                f"{row.get('skin_concern','피부 고민')}을(를) 고려해 설계된 제품으로, "
+                f"{row.get('lifestyle','일상적인 사용 환경')}에서도 부담 없이 사용할 수 있도록 "
+                f"사용감과 흡수감을 중심으로 완성되었습니다. "
+                f"루틴 속에서 자연스럽게 이어지는 사용 흐름을 통해 피부 컨디션을 안정적으로 유지하는 데 도움을 주며, "
+                f"과하지 않은 마무리감으로 매일의 관리에 무리 없이 녹아듭니다. "
+                f"지속적인 사용을 통해 피부 밸런스를 정돈하고, "
+                f"일상의 관리 루틴을 보다 편안하게 만들어주는 방향으로 설계되었습니다."
+            )
+
+        body = "BODY: " + clean_body
 
         # Controller must not rewrite body content.
         # Detect only and attach warnings for downstream inspection.

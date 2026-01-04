@@ -295,7 +295,7 @@ class MessageVerifier:
         elif len(body) > MAX_BODY_LEN:
             warnings.append("body_len>350")
 
-        # Brand check (combined title + body)
+        # Brand check (non-mutating)
         combined_brand_text = f"{title}\n{body}"
         if not self._has_brand(combined_brand_text, brand):
             errors.append("brand_missing")
