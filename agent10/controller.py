@@ -113,6 +113,27 @@ _CRM_SLOT_BANNED_FRAGMENTS = [
     "관찰",
 ]
 
+# -------------------------------------------------
+# Slot text surface normalization (NO generation)
+# -------------------------------------------------
+PHRASE_NORMALIZE = {
+    "야외/운동": "야외 활동이나 운동이 잦은 날",
+    "야외활동/운동 잦음": "야외 활동이나 운동이 잦은 경우",
+    "트러블,피지": "트러블과 피지가 함께 고민될 때",
+    "아침/저녁": "아침과 저녁 모두",
+    "여름 집중": "여름처럼 피부 컨디션이 쉽게 흔들리는 시기",
+}
+
+def _normalize_slot_surface(text: str) -> str:
+    if not text:
+        return text
+    t = text
+    for k, v in PHRASE_NORMALIZE.items():
+        t = t.replace(k, v)
+    # comma list -> conjunction
+    t = re.sub(r"([가-힣]+),([가-힣]+)", r"\1과 \2", t)
+    return t
+
 
 def _is_ha_da_style(s: str) -> bool:
     """Heuristic: block strong declarative narration style (..이다/..다.)"""
@@ -267,6 +288,10 @@ def build_slot_texts_rule(
         i += 1
 
     slot1, slot2, slot3, slot4 = slots
+    slot1 = _normalize_slot_surface(slot1)
+    slot2 = _normalize_slot_surface(slot2)
+    slot3 = _normalize_slot_surface(slot3)
+    slot4 = _normalize_slot_surface(slot4)
 
     return {
         "slot1_text": slot1.strip(),
@@ -1062,6 +1087,27 @@ def main(persona_id, topk=3, use_market_context=False, verbose=True):
                 "brand_rule": brand_rule,
             })
             continue
+
+        # -------------------------------------------------
+        # Slot-to-slot discourse glue (surface-level only)
+        # - Do NOT rewrite content
+        # - Deterministic prefix injection per slot line
+        # -------------------------------------------------
+        SLOT_GLUE = [
+            "",                 # slot1: 그대로 시작
+            "그래서 ",           # slot2
+            "이후에는 ",         # slot3
+            "이런 흐름이라면 ",  # slot4
+        ]
+
+        _lines = [ln.strip() for ln in clean_body.splitlines() if ln.strip()]
+        _glued = []
+        for idx, ln in enumerate(_lines):
+            prefix = SLOT_GLUE[idx] if idx < len(SLOT_GLUE) else ""
+            if prefix and ln.startswith(prefix.strip()):
+                prefix = ""
+            _glued.append(prefix + ln)
+        clean_body = "\n".join(_glued)
 
         body = "BODY: " + clean_body
 
